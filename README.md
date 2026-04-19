@@ -1,82 +1,56 @@
 # VS AgentCore — Multi-Agent Platform (A2A)
 
-> **Vidya Sankalp · Applied GenAI Engineering**
-> Multi-agent clinical trial research platform built on AWS Bedrock AgentCore
-> using the A2A (Agent-to-Agent) protocol.
+> Vidya Sankalp · Applied GenAI Engineering
 
 ## Architecture
 
-Supervisor + 5 specialist sub-agents communicating via A2A JSON-RPC 2.0.
-
 ```
-User → Platform API → Supervisor Agent
-                          ├── A2A → Research Agent   (Pinecone search + synthesis)
-                          ├── A2A → Knowledge Agent  (Neo4j graph queries)
-                          ├── A2A → HITL Agent       (clarification + interrupt)
-                          ├── A2A → Safety Agent     (guardrail evaluation)
-                          └── A2A → Chart Agent      (Chart.js generation)
+User → Platform API → Supervisor Agent (create_agent + full middleware)
+                           ├── @tool → Research Agent  (search + summariser MCP tools)
+                           ├── @tool → Knowledge Agent (graph + summariser MCP tools)
+                           ├── @tool → HITL Agent      (clarify MCP tool + HITL middleware)
+                           ├── @tool → Safety Agent    (GPT-4o-mini judge, no tools)
+                           └── @tool → Chart Agent     (search + summariser + chart MCP tools)
 ```
 
-## Project Structure
+## Key Design Decisions
 
-```
-vs-agentcore-multiagent/
-├── agents/
-│   ├── supervisor/     # Intent classifier + A2A router + middleware
-│   ├── research/       # Pinecone semantic search + evidence synthesis
-│   ├── knowledge/      # Neo4j graph traversal + trial discovery
-│   ├── hitl/           # Clarification card + NodeInterrupt + resume
-│   ├── safety/         # Faithfulness + consistency guardrail evaluation
-│   └── chart/          # Chart.js generation from numerical answers
-├── shared/
-│   ├── a2a/
-│   │   ├── schemas.py  # A2A protocol Pydantic models (AgentCard, Task, Skill...)
-│   │   ├── client.py   # A2A HTTP client (used by Supervisor)
-│   │   └── server.py   # A2A FastAPI base server (used by all sub-agents)
-│   ├── middleware/     # SemanticCache, EpisodicMemory, Tracer, Guardrail...
-│   └── config.py       # SSM + Secrets Manager loader
-├── infra/
-│   ├── main.tf         # 6 AgentCore Runtimes + A2A Gateway
-│   └── variables.tf
-├── scripts/
-│   └── deploy.sh       # Build + push + deploy all agents
-└── tests/
-    ├── test_a2a_schemas.py
-    ├── test_supervisor.py
-    ├── test_a2a_flow.py
-    └── test_chart_agent.py
-```
+**AGENT_NAME env var drives everything per container:**
+  Terraform sets `AGENT_NAME=research-agent` on the Research Agent runtime.
+  `core/aws.get_bedrock_prompt(os.environ["AGENT_NAME"])` reads the right prompt.
+  Same pattern for all 6 agents — one code path, infrastructure drives routing.
 
-## Quick Start
+**core/ is copied unchanged from vs-agentcore-platform-aws:**
+  aws.py, cache.py, pinecone_store.py, middleware/ — zero changes.
+  Supervisor uses the full middleware stack. Sub-agents use none.
+
+**Supervisor A2A tools (agents/supervisor/a2a_tools.py):**
+  Each sub-agent is wrapped as a @tool calling invoke_agent_runtime().
+  Sub-agent tokens are re-streamed through Supervisor → Platform API → UI.
+  HITLInterrupt exception propagates HITL back up the chain.
+
+**deploy.sh order:**
+  secrets → prompts (6 Bedrock prompts) → lambdas → sub-agents → ssm-arns → supervisor → platform
+
+## What to Copy from vs-agentcore-platform-aws
 
 ```bash
-# 1. Clone
-git clone <repo-url>
-cd vs-agentcore-multiagent
+# core layer (unchanged)
+cp -r ../vs-agentcore-platform-aws/agent/core/ core/
 
-# 2. Configure
-cp .env.example .env.prod
-# Fill in .env.prod
+# supervisor middleware (unchanged)
+cp -r ../vs-agentcore-platform-aws/agent/middleware/ agents/supervisor/middleware/
 
-# 3. Deploy infra
-./scripts/deploy.sh infra
+# platform gateway (unchanged)
+cp -r ../vs-agentcore-platform-aws/platform/gateway/ platform/gateway/
+cp ../vs-agentcore-platform-aws/platform/static/traces_dashboard.html platform/static/
 
-# 4. Deploy all agents (sub-agents first, supervisor last)
-./scripts/deploy.sh all
+# ui (unchanged)
+cp -r ../vs-agentcore-platform-aws/ui/ ui/
+
+# mcp tools (unchanged except chart_lambda is new)
+cp -r ../vs-agentcore-platform-aws/mcp_tools/search_lambda/   mcp_tools/search_lambda/
+cp -r ../vs-agentcore-platform-aws/mcp_tools/graph_lambda/    mcp_tools/graph_lambda/
+cp -r ../vs-agentcore-platform-aws/mcp_tools/hitl_lambda/     mcp_tools/hitl_lambda/
+cp -r ../vs-agentcore-platform-aws/mcp_tools/summariser_lambda/ mcp_tools/summariser_lambda/
 ```
-
-## A2A Protocol
-
-Each sub-agent publishes an Agent Card at:
-```
-GET https://<agent-url>/.well-known/agent.json
-```
-
-The Supervisor discovers all agents at cold start by reading their Agent Cards,
-then routes tasks based on Skills and intent classification.
-
-See `shared/a2a/schemas.py` for full A2A type definitions.
-
-## Related
-
-- `vs-agentcore-platform-aws` — single-agent platform (predecessor to this repo)

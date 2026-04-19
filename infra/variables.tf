@@ -1,25 +1,30 @@
-# infra/variables.tf
+# infra/variables.tf — vs-agentcore-multiagent
+# ==============================================
+# Copy of single agent variables.tf with image URIs for all 6 agents.
 
 variable "aws_region" {
   default = "us-east-1"
 }
 
-variable "account_id" {
-  description = "AWS Account ID"
+variable "postgres_password" {
+  description = "RDS Postgres password — set in .env.prod"
+  sensitive   = true
 }
 
-variable "project" {
-  default = "vs-agentcore-multiagent"
+variable "ssm_prefix" {
+  default = "/vs-agentcore-multiagent/prod"
 }
 
-variable "env" {
-  default = "prod"
-}
+# ── ECS image URIs (set by deploy.sh step_agents) ─────────────────────────
+variable "platform_image_uri" { description = "Platform API ECR image URI" }
+variable "ui_image_uri"       { description = "UI ECR image URI" }
 
-# Agent image tags — set per deployment
-variable "supervisor_image_tag" { default = "latest" }
-variable "research_image_tag"   { default = "latest" }
-variable "knowledge_image_tag"  { default = "latest" }
-variable "hitl_image_tag"       { default = "latest" }
-variable "safety_image_tag"     { default = "latest" }
-variable "chart_image_tag"      { default = "latest" }
+# ── AgentCore runtime image URIs ───────────────────────────────────────────
+# Not used directly by Terraform (AgentCore runtimes created via AWS CLI)
+# Kept here for reference and for deploy.sh to read via terraform output
+variable "supervisor_image_uri" { description = "Supervisor Agent ECR image URI" }
+variable "research_image_uri"   { description = "Research Agent ECR image URI" }
+variable "knowledge_image_uri"  { description = "Knowledge Agent ECR image URI" }
+variable "hitl_image_uri"       { description = "HITL Agent ECR image URI" }
+variable "safety_image_uri"     { description = "Safety Agent ECR image URI" }
+variable "chart_image_uri"      { description = "Chart Agent ECR image URI" }

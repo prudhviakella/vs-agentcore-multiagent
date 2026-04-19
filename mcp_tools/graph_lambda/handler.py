@@ -1,0 +1,1 @@
+"""Copy from vs-agentcore-platform-aws/mcp_tools/graph_lambda/handler.py"""
