@@ -3,12 +3,12 @@ mcp_tools/chart_lambda/handler.py
 ===================================
 MCP Lambda tool: generates Chart.js JSON config from numerical clinical trial data.
 
-Registered in MCP Gateway as tool name: chart___chart_tool
+Registered in MCP Gateway as tool name: tool-chart___chart_tool
 Input:  {"data": {...}, "chart_type": "auto", "title": "..."}
 Output: {"chart": {...Chart.js config...}, "chart_type": "bar"}
 
 CALL PATH:
-  Chart Agent LLM decides to call chart___chart_tool
+  Chart Agent LLM decides to call tool-chart___chart_tool
     → LangChain StructuredTool.invoke()
       → httpx POST (SigV4 signed) → Bedrock MCP Gateway
         → This Lambda

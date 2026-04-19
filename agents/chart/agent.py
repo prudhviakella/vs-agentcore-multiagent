@@ -4,7 +4,7 @@ agents/chart/agent.py
 Chart Agent assembly.
 
 IDENTICAL pattern to research/agent.py with these differences:
-  1. tools       : search_tool + summariser_tool + chart___chart_tool
+  1. tools       : search_tool + summariser_tool + tool-chart___chart_tool
   2. AGENT_NAME  : "chart-agent"
                    → SSM: /chart-agent/prod/bedrock/prompt_id
   3. AsyncPostgresSaver (same as all agents)
@@ -16,7 +16,7 @@ RESPONSIBILITY:
 TOOL SEQUENCE (in system prompt):
   Step 1 → search_tool       : retrieve numerical evidence from Pinecone
   Step 2 → summariser_tool   : extract and structure the numbers
-  Step 3 → chart___chart_tool: generate Chart.js config from the numbers
+  Step 3 → tool-chart___chart_tool: generate Chart.js config from the numbers
 
 SYSTEM PROMPT (in Bedrock as "chart-agent") instructs:
   - Always search first to get the raw data
@@ -26,10 +26,10 @@ SYSTEM PROMPT (in Bedrock as "chart-agent") instructs:
       line      → trends over time
       pie       → proportional distributions (e.g. Phase 1/2/3/4 split)
       doughnut  → same as pie with better readability
-  - Call chart___chart_tool with the structured data
+  - Call tool-chart___chart_tool with the structured data
   - Return a text summary alongside the chart
 
-chart___chart_tool (MCP Gateway → chart_lambda):
+tool-chart___chart_tool (MCP Gateway → chart_lambda):
   Input:  {"data": {...}, "chart_type": "bar", "title": "..."}
   Output: {"chart": {...Chart.js config...}, "chart_type": "bar"}
   The chart config is yielded as a special event in app.py:

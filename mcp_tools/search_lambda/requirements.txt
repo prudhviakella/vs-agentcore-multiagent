@@ -1,1 +1,3 @@
-"""Copy from vs-agentcore-platform-aws/mcp_tools/search_lambda/requirements.txt"""
+pinecone==6.0.0
+openai==1.68.2
+boto3==1.37.28

@@ -1,1 +1,1 @@
-"""Copy from vs-agentcore-platform-aws/mcp_tools/hitl_lambda/requirements.txt"""
+# No extra dependencies — boto3 provided by Lambda runtime

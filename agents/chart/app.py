@@ -55,7 +55,7 @@ _agent = None
 CHART_TOOLS = {
     "tool-search___search_tool",
     "tool-summariser___summariser_tool",
-    "chart___chart_tool",
+    "tool-chart___chart_tool",
 }
 
 _EPISODIC_PATTERN = re.compile(r'\s*\nEPISODIC:\s*(YES|NO)[\d.\s]*$', re.IGNORECASE)
