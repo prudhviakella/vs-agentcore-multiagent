@@ -63,7 +63,7 @@ app    = BedrockAgentCoreApp()
 _agent = None
 
 HITL_TOOLS = {
-    "clarify___ask_user_input",
+    "tool-hitl___ask_user_input",
 }
 
 _EPISODIC_PATTERN = re.compile(r'\s*\nEPISODIC:\s*(YES|NO)[\d.\s]*$', re.IGNORECASE)
@@ -244,7 +244,7 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
                             yield {"type": "token", "content": safe}
 
                 elif kind == "on_tool_start":
-                    is_hitl_tool = "ask_user_input" in name
+                    is_hitl_tool = "ask_user_input" in name or "tool-hitl" in name
                     if is_hitl_tool:
                         raw        = data.get("input", {})
                         hitl_input = _extract_hitl_input(raw)
@@ -253,7 +253,7 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
                         yield {"type": "tool_start", "name": name}
 
                 elif kind == "on_tool_end":
-                    is_hitl_tool = "ask_user_input" in name
+                    is_hitl_tool = "ask_user_input" in name or "tool-hitl" in name
                     if is_hitl_tool:
                         # Path A — tool ran to completion
                         log.info(f"[HITL] Path A — tool ended")
@@ -361,6 +361,14 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
     finally:
         elapsed = round((time.perf_counter() - t0) * 1_000, 2)
         log.info(f"[HITL] Done  latency_ms={elapsed}")
+        # Emit observability span for Supervisor distributed tracing
+        yield {
+            "type": "span",
+            "data": {
+                "agent":      "hitl",
+                "elapsed_ms": elapsed,
+            }
+        }
         yield {"type": "done", "latency_ms": elapsed, "answer": full_answer}
 
 

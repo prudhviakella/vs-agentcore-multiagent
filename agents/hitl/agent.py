@@ -79,7 +79,7 @@ async def build_hitl_agent(tools: list[Any]) -> Any:
     # interrupt_on must match the exact tool name from the MCP Gateway
     middleware = [
         HumanInTheLoopMiddleware(
-            interrupt_on={"clarify___ask_user_input": True},
+            interrupt_on={"tool-hitl___ask_user_input": True},
         ),
     ]
 

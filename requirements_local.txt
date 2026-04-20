@@ -1,0 +1,37 @@
+# requirements-local.txt
+# =======================
+# Install this once for local development — covers all 6 agents.
+# Usage: python3.11 -m pip install -r requirements-local.txt
+#
+# Individual agent requirements.txt files are for Docker builds only.
+
+# ── Core agent framework ──────────────────────────────────────────────────
+bedrock-agentcore
+langchain>=0.3.0
+langchain-openai>=0.2.0
+langchain-mcp-adapters>=0.2.0
+langgraph>=0.2.0
+langgraph-checkpoint-postgres
+
+# ── AWS ───────────────────────────────────────────────────────────────────
+boto3>=1.42.0
+botocore>=1.42.86
+
+# ── OpenAI ────────────────────────────────────────────────────────────────
+openai>=2.0.0
+
+# ── Pinecone (Research + Chart agents) ───────────────────────────────────
+pinecone>=6.0.0
+
+# ── Neo4j (Knowledge agent) ───────────────────────────────────────────────
+neo4j>=5.28.1
+
+# ── Postgres (all agents — checkpointer) ─────────────────────────────────
+psycopg[binary]>=3.1.0
+psycopg-pool>=3.2.0
+
+# ── HTTP (Supervisor LOCAL_MODE → sub-agents via httpx) ───────────────────
+httpx>=0.27.0
+
+# ── Pydantic ──────────────────────────────────────────────────────────────
+pydantic>=2.0.0

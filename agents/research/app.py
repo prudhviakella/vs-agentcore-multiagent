@@ -163,6 +163,14 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
 
     elapsed = round((time.perf_counter() - t0) * 1_000, 2)
     log.info(f"[Research] Done  latency_ms={elapsed}  answer_len={len(full_answer)}")
+    # Emit observability span for Supervisor distributed tracing
+    yield {
+        "type": "span",
+        "data": {
+            "agent":      "research",
+            "elapsed_ms": elapsed,
+        }
+    }
     yield {"type": "done", "latency_ms": elapsed, "answer": full_answer}
 
 

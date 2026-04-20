@@ -1,101 +1,38 @@
-# .env.prod — vs-agentcore-multiagent
-# =====================================
-# Fill in all values then run: source .env.prod
-# NEVER commit this file to git — it is in .gitignore
+export AWS_REGION=us-east-1
+export AWS_ACCOUNT_ID=CHANGE_ME
+export SSM_PREFIX=/vs-agentcore-multiagent/prod
 
-# ── AWS ───────────────────────────────────────────────────────────────────
-AWS_REGION=us-east-1
-AWS_ACCOUNT_ID=                         # your 12-digit AWS account ID
+# ── Environment ────────────────────────────────────────────────────────────
+export AGENT_ENV=prod
+export LOCAL_MODE=false
 
-# ── SSM prefix (all parameters live under this path) ─────────────────────
-SSM_PREFIX=/vs-agentcore-multiagent/prod
+# ── OpenAI ─────────────────────────────────────────────────────────────────
+export OPENAI_API_KEY=sk-...
 
-# ── OpenAI ────────────────────────────────────────────────────────────────
-OPENAI_API_KEY=sk-...                   # used by all 6 agents + summariser Lambda
+# ── Pinecone ────────────────────────────────────────────────────────────────
+export PINECONE_API_KEY=pcsk_...
+export PINECONE_INDEX_NAME=clinical-agent
+export CLINICAL_TRIALS_INDEX=clinical-trials-index
 
-# ── Pinecone ──────────────────────────────────────────────────────────────
-PINECONE_API_KEY=pcsk_...               # Pinecone API key
-PINECONE_INDEX_NAME=clinical-agent      # Pinecone index for episodic memory + cache
-CLINICAL_TRIALS_INDEX=clinical-trials-index  # Pinecone index for trial document chunks
+# ── Neo4j ───────────────────────────────────────────────────────────────────
+export NEO4J_URI=neo4j+s://CHANGE_ME.databases.neo4j.io
+export NEO4J_USER=CHANGE_ME
+export NEO4J_PASSWORD=CHANGE_ME
 
-# ── Neo4j AuraDB ──────────────────────────────────────────────────────────
-NEO4J_URI=neo4j+s://xxxxxxxx.databases.neo4j.io
-NEO4J_USER=neo4j
-NEO4J_PASSWORD=                         # your Neo4j password
+# ── Platform ────────────────────────────────────────────────────────────────
+export PLATFORM_API_KEY=vs-CHANGE_ME
 
-# ── Platform API Key ──────────────────────────────────────────────────────
-# Used by UI to authenticate with Platform API
-# Generate a random string: openssl rand -hex 32
-PLATFORM_API_KEY=vs-
+# ── RDS Postgres ─────────────────────────────────────────────────────────────
+export RDS_PASSWORD=CHANGE_ME
+export POSTGRES_URL=postgresql://postgres:CHANGE_ME@CHANGE_ME.rds.amazonaws.com:5432/clinical_agent
 
-# ── RDS Postgres ──────────────────────────────────────────────────────────
-# Leave blank on first deploy — fill after Terraform creates RDS (step_platform)
-# Format: postgresql://postgres:<password>@<rds-endpoint>:5432/clinical_agent
-POSTGRES_URL=
-RDS_PASSWORD=                           # set BEFORE running deploy.sh platform
-                                        # this password is used to create the RDS instance
+# ── Terraform ───────────────────────────────────────────────────────────────
+export TF_STATE_BUCKET=vs-agentcore-ma-tfstate
 
-# ── Terraform state bucket ────────────────────────────────────────────────
-# Created automatically by deploy.sh step_platform
-# Bucket name: vs-agentcore-ma-tfstate
-TF_STATE_BUCKET=vs-agentcore-ma-tfstate
-
-# ── Sub-agent URLs ────────────────────────────────────────────────────────
-# Populated automatically by deploy.sh step_ssm_arns after step_agents
-# Left blank here — deploy.sh reads them from SSM after runtime creation
-RESEARCH_AGENT_URL=
-KNOWLEDGE_AGENT_URL=
-HITL_AGENT_URL=
-SAFETY_AGENT_URL=
-CHART_AGENT_URL=
-SUPERVISOR_AGENT_URL=
-
-# ── DEPLOYMENT CHECKLIST ──────────────────────────────────────────────────
-#
-# FIRST DEPLOY (in order):
-#
-#   1. Fill all values above EXCEPT POSTGRES_URL and sub-agent URLs
-#
-#   2. source .env.prod
-#
-#   3. Create prompt files in prompts/
-#      prompts/supervisor.txt
-#      prompts/research.txt
-#      prompts/knowledge.txt
-#      prompts/hitl.txt
-#      prompts/safety.txt
-#      prompts/chart.txt
-#
-#   4. ./scripts/deploy.sh prompts    # create 6 Bedrock prompts → SSM
-#
-#   5. ./scripts/deploy.sh secrets    # push API keys (postgres skipped)
-#
-#   6. ./scripts/deploy.sh iam        # IAM roles
-#
-#   7. ./scripts/deploy.sh lambdas    # 5 Lambda tools
-#
-#   8. ./scripts/deploy.sh gateway    # MCP Gateway + 5 targets
-#
-#   9. ./scripts/deploy.sh platform   # Terraform: RDS + ECS + ALB
-#
-#  10. Get RDS endpoint from Terraform output, fill POSTGRES_URL above:
-#      POSTGRES_URL=postgresql://postgres:<RDS_PASSWORD>@<rds-endpoint>:5432/clinical_agent
-#
-#  11. source .env.prod && ./scripts/deploy.sh secrets   # push postgres secret
-#
-#  12. ./scripts/deploy.sh agents     # 6 AgentCore Runtimes (sub-agents first)
-#
-#  13. ./scripts/deploy.sh ssm-arns   # verify all ARNs written to SSM
-#
-# SUBSEQUENT DEPLOYS (after code changes):
-#
-#   # Redeploy one agent:
-#   ./scripts/deploy.sh agents
-#
-#   # Redeploy platform/UI only:
-#   ./scripts/deploy.sh redeploy
-#
-#   # Update a prompt (no redeploy needed):
-#   Edit prompts/<agent>.txt
-#   ./scripts/deploy.sh prompts
-#   # Agent picks up new prompt on next cold start
+# ── Sub-agent URLs (populated by deploy.sh ssm-arns after agents deploy) ────
+export RESEARCH_AGENT_URL=
+export KNOWLEDGE_AGENT_URL=
+export HITL_AGENT_URL=
+export SAFETY_AGENT_URL=
+export CHART_AGENT_URL=
+export SUPERVISOR_AGENT_URL=

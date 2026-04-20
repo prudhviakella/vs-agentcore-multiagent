@@ -11,6 +11,8 @@
 #   ./scripts/deploy.sh platform   # Step 5: Terraform (ECS, ALB, RDS)
 #   ./scripts/deploy.sh agents     # Step 6: build + deploy 6 AgentCore Runtimes
 #   ./scripts/deploy.sh ssm-arns   # Step 7: write sub-agent ARNs to SSM (Supervisor reads these)
+#   ./scripts/deploy.sh registry  # Step 7b: write agent registry to SSM (dynamic tool building)
+#   ./scripts/deploy.sh check      # Verify all prerequisites
 #   ./scripts/deploy.sh all        # All steps in order
 #   ./scripts/deploy.sh redeploy   # Quick ECS redeploy after platform code changes
 #
@@ -37,7 +39,7 @@
 #   "tool-graph"     → "tool-graph___graph_tool"
 #   "clarify"        → "clarify___ask_user_input"
 #   "tool-summariser"→ "tool-summariser___summariser_tool"
-#   "chart"          → "chart___chart_tool"           ← NEW
+#   "tool-chart"     → "tool-chart___chart_tool"      ← NEW
 
 set -uo pipefail
 # Note: -e removed intentionally — each command handles its own errors
@@ -1013,6 +1015,62 @@ step_ssm_arns() {
 }
 
 
+# ── Step 7b: Write agent registry to SSM ─────────────────────────────────
+# Supervisor reads this at cold start to build tools dynamically.
+# Update this to add new agents without code changes.
+
+step_registry() {
+  echo ""
+  echo "► Step 7b: Agent Registry → SSM"
+
+  python3 - << PYEOF2
+import boto3, json
+
+region     = "${REGION}"
+ssm_prefix = "${SSM_PREFIX}"
+ssm        = boto3.client("ssm", region_name=region)
+
+registry = [
+    {
+        "name":        "research",
+        "description": "Search clinical trial documents and return cited evidence-based answers. Use for specific trial questions — efficacy, safety, dosage, eligibility criteria, adverse events. Searches 5,772 Pinecone document chunks.",
+        "port":        8001
+    },
+    {
+        "name":        "knowledge",
+        "description": "Query the biomedical knowledge graph for structured trial information. Use for trial discovery, sponsor lookups, drug/disease relationships, geographic queries. Queries Neo4j with Cypher.",
+        "port":        8002
+    },
+    {
+        "name":        "safety",
+        "description": "Evaluate an answer draft for faithfulness and consistency. ALWAYS call BEFORE returning a final answer. Returns PASSED or BLOCKED: <reason>.",
+        "port":        8003
+    },
+    {
+        "name":        "chart",
+        "description": "Generate a Chart.js visualisation from numerical clinical trial data. Use when answer has comparative numbers or user asks for a chart. Renders inline in the chat UI.",
+        "port":        8005
+    },
+]
+
+ssm.put_parameter(
+    Name=f"{ssm_prefix}/agents/registry",
+    Value=json.dumps(registry),
+    Type="String",
+    Overwrite=True,
+)
+print(f"  ✅ Registry written to SSM: {ssm_prefix}/agents/registry")
+print(f"  Agents: {[a['name'] for a in registry]}")
+print("")
+print("  To add a new agent later (no code changes):")
+print("  1. Deploy new AgentCore Runtime")
+print("  2. Add entry to registry in this step and re-run:")
+print("     ./scripts/deploy.sh registry")
+print("  3. Restart Supervisor container to pick up new agent")
+PYEOF2
+}
+
+
 # ── Quick ECS redeploy ────────────────────────────────────────────────────
 
 step_redeploy() {
@@ -1212,6 +1270,7 @@ case "${ACTION}" in
   plan)      step_platform ;;
   agents)    step_agents   ;;
   ssm-arns)  step_ssm_arns ;;
+  registry)  step_registry  ;;
   redeploy)  step_redeploy "$@" ;;
 
   all)
@@ -1241,6 +1300,8 @@ case "${ACTION}" in
     echo "     source .env.prod && ./scripts/deploy.sh secrets"
     echo "  3. Deploy all 6 agents:"
     echo "     ./scripts/deploy.sh agents"
+    echo "  4. Write agent registry:"
+    echo "     ./scripts/deploy.sh registry"
     echo "  ════════════════════════════════════════════════════"
     ;;
 

@@ -136,6 +136,14 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
     elapsed = round((time.perf_counter() - t0) * 1_000, 2)
     verdict = "PASSED" if "BLOCKED" not in full_answer.upper() else "BLOCKED"
     log.info(f"[Safety] Done  verdict={verdict}  latency_ms={elapsed}")
+    # Emit observability span for Supervisor distributed tracing
+    yield {
+        "type": "span",
+        "data": {
+            "agent":      "safety",
+            "elapsed_ms": elapsed,
+        }
+    }
     yield {"type": "done", "latency_ms": elapsed, "answer": full_answer}
 
 

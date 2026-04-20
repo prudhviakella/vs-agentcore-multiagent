@@ -164,14 +164,41 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
                 log.info(f"[Chart] ✓ {name}")
                 # Check if chart_tool returned a chart config
                 if "chart" in name:
+                    import json as _json
                     output = data.get("output", {})
+                    log.info(f"[Chart] tool output type={type(output).__name__}  preview={str(output)[:200]}")
+
+                    # MCP tools can return: string, dict, ToolMessage, or list of content blocks
+                    # Unwrap all possible formats
+                    raw = output
+
+                    # If it's a LangChain message object with content
+                    if hasattr(raw, "content"):
+                        raw = raw.content
+
+                    # If it's a list (content blocks), join text blocks
+                    if isinstance(raw, list):
+                        raw = " ".join(
+                            block.get("text", "") if isinstance(block, dict) else str(block)
+                            for block in raw
+                        )
+
+                    # If it's a string, try JSON parse
+                    if isinstance(raw, str):
+                        try:
+                            raw = _json.loads(raw)
+                        except Exception:
+                            pass
+
+                    log.info(f"[Chart] parsed output type={type(raw).__name__}  has_chart={'chart' in raw if isinstance(raw, dict) else False}")
+
                     # chart_lambda returns {"chart": {...}, "chart_type": "bar"}
-                    if isinstance(output, dict) and "chart" in output:
-                        log.info(f"[Chart] Chart config generated: type={output.get('chart_type')}")
+                    if isinstance(raw, dict) and "chart" in raw:
+                        log.info(f"[Chart] ✅ Chart config found: type={raw.get('chart_type')}")
                         yield {
                             "type":       "chart",
-                            "config":     output["chart"],
-                            "chart_type": output.get("chart_type", "bar"),
+                            "config":     raw["chart"],
+                            "chart_type": raw.get("chart_type", "bar"),
                         }
                 yield {"type": "tool_end", "name": name}
 
@@ -194,6 +221,14 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
 
     elapsed = round((time.perf_counter() - t0) * 1_000, 2)
     log.info(f"[Chart] Done  latency_ms={elapsed}  answer_len={len(full_answer)}")
+    # Emit observability span for Supervisor distributed tracing
+    yield {
+        "type": "span",
+        "data": {
+            "agent":      "chart",
+            "elapsed_ms": elapsed,
+        }
+    }
     yield {"type": "done", "latency_ms": elapsed, "answer": full_answer}
 
 

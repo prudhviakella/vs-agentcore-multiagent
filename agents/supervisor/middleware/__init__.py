@@ -94,14 +94,15 @@ def build_stack(domain: str, store, safety_llm, cache: SemanticCache) -> list:
         # Layer 8: Action Guardrail — DISABLED (same as single agent)
         # ActionGuardrailMiddleware(),
 
-        # Layer 9: Output Guardrail — LAST, closest to user
-        # Safety Agent handles faithfulness via A2A, but OutputGuardrailMiddleware
-        # still runs the code-level medical action check (< 1ms, no LLM call).
-        OutputGuardrailMiddleware(
-            llm                    = safety_llm,
-            faithfulness_threshold = 0.00,   # TODO: raise to 0.70 after calibration
-            confidence_threshold   = 0.00,   # TODO: raise to 0.70 after calibration
-        ),
+        # Layer 9: OutputGuardrailMiddleware DISABLED on Supervisor.
+        # Safety Agent handles faithfulness + consistency via A2A tool call.
+        # Running it here too causes double-evaluation and score leakage in stream.
+        # Re-enable after calibration with faithfulness_threshold=0.70.
+        # OutputGuardrailMiddleware(
+        #     llm                    = safety_llm,
+        #     faithfulness_threshold = 0.00,
+        #     confidence_threshold   = 0.00,
+        # ),
     ]
 
 

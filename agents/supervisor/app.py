@@ -226,9 +226,14 @@ async def _stream_supervisor(agent, input_data, config, agent_context, token_que
 
     HITL paths A/B/C/D preserved from single agent (same code).
     """
-    _tail_buffer    = ""
-    hitl_input      = {}
-    interrupt_fired = False
+    _tail_buffer     = ""
+    hitl_input       = {}
+    interrupt_fired  = False
+    _safety_blocked  = False   # set True when safety_agent returns BLOCKED
+    _block_reason    = ""      # reason string from safety_agent
+    _answer_complete = False   # set True when safety_passed — suppress Supervisor LLM tokens
+    _safety_blocked = False   # set True when safety_agent returns BLOCKED
+    _block_reason   = ""      # reason string from safety_agent
 
     def _flush_safe():
         nonlocal _tail_buffer
@@ -240,9 +245,21 @@ async def _stream_supervisor(agent, input_data, config, agent_context, token_que
 
     # Drain token_queue while astream_events runs
     async def _drain_queue():
+        nonlocal _safety_blocked, _block_reason, _answer_complete
         while True:
             try:
                 item = token_queue.get_nowait()
+                # Intercept safety verdict events — don't yield to user
+                if isinstance(item, dict):
+                    if item.get("type") == "safety_blocked":
+                        _safety_blocked = True
+                        _block_reason   = item.get("reason", "")
+                        log.info(f"[Supervisor] Safety BLOCKED intercepted — suppressing LLM tokens")
+                        continue
+                    elif item.get("type") == "safety_passed":
+                        _answer_complete = True
+                        log.info("[Supervisor] Safety PASSED — suppressing Supervisor LLM tokens")
+                        continue   # don't yield safety_passed to user
                 yield item
             except asyncio.QueueEmpty:
                 break
@@ -258,11 +275,21 @@ async def _stream_supervisor(agent, input_data, config, agent_context, token_que
             async for item in _drain_queue():
                 yield item
 
+            # Break out of event loop if safety blocked (prevents LLM retry)
+            # For _answer_complete we let the natural loop end — no break needed
+            if _safety_blocked:
+                break
+
             kind = event.get("event", "")
             name = event.get("name",  "")
             data = event.get("data",  {})
 
             if kind == "on_chat_model_stream":
+                # Suppress Supervisor LLM tokens if:
+                # a) safety BLOCKED — we'll yield the standard refusal
+                # b) safety PASSED — answer already streamed by sub-agent, don't repeat
+                if _safety_blocked or _answer_complete:
+                    continue
                 chunk   = data.get("chunk", {})
                 content = getattr(chunk, "content", "")
                 if isinstance(content, str) and content:
@@ -356,6 +383,22 @@ async def _stream_supervisor(agent, input_data, config, agent_context, token_que
 
     async for item in _drain_queue():
         yield item
+
+    # If safety blocked — append a warning note to the answer already streamed
+    # (we cannot retract tokens already sent to the user in streaming mode)
+    if _safety_blocked:
+        reason_short = _block_reason.replace("BLOCKED:", "").strip()[:120]
+        log.info(f"[Supervisor] Appending safety warning  reason={reason_short}")
+        yield {
+            "type":    "token",
+            "content": (
+                f"\n\n⚠️ **Safety Note:** This answer could not be fully verified "
+                f"against retrieved sources. Please verify independently via "
+                f"ClinicalTrials.gov or consult a qualified professional."
+                f"\n*Reason: {reason_short}*"
+            )
+        }
+        return
 
     # Path C — check Postgres checkpoint for pending interrupt
     if not interrupt_fired:
