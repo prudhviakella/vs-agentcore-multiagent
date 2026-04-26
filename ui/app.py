@@ -388,7 +388,12 @@ async function sse(url, payload) {
   let lastAnswerBuf  = '';   // tokens since last tool_start, for done-flush fallback
 
   // ── helpers ──────────────────────────────────────────────────────────────
-  const isToolCallJson = s => /^[\s\n]*(multi_tool_use|functions\.|\{)/.test(s);
+  const isToolCallJson = s => (
+    // Raw tool call syntax
+    /^[\s\n]*(multi_tool_use|functions\.|\{|\[)/.test(s) ||
+    // LLM narration before calling a tool ("Let me use...", "I will call...", etc.)
+    /^[\s\n]*(Let me (use|call|check|retrieve|query|now|first)|I will (use|call|now|first)|I\'ll (use|call|now)|I need to (use|call|retrieve))/i.test(s)
+  );
 
   function enterDiscard(bufSeed) {
     discarding   = true;
@@ -410,6 +415,19 @@ async function sse(url, payload) {
   function handleAfterThinking(afterRaw) {
     // Called after </thinking> seals — decide what to do with remaining content
     const afterTrimmed = afterRaw.trim();
+
+    // If chart already fired, the answer starts next regardless of afterRaw content
+    if (readyForAnswer) {
+      readyForAnswer = false;
+      discarding     = false;
+      thinkingText   = '';
+      if (afterTrimmed && !afterTrimmed.startsWith('<') && !isToolCallJson(afterRaw)) {
+        startAnswer(afterTrimmed);
+      }
+      // Otherwise answer will start on the next token in PREBUF
+      return;
+    }
+
     if (!afterTrimmed || isToolCallJson(afterRaw)) {
       enterDiscard(afterTrimmed);
     } else if (afterTrimmed.startsWith('<thinking>')) {
@@ -469,20 +487,36 @@ async function sse(url, payload) {
           toolEls.filter(el => !el.classList.contains('done'))
             .forEach(el => markDone(el, 'Clarification needed'));
           toolEls = [];
-          lastAnswerBuf = '';  // discard any buffered junk before showing HITL
+          lastAnswerBuf = '';
+          thinkingText  = '';
+          // Remove any answer bubble that opened from narration tokens before interrupt
+          if (agentEl) {
+            const row = agentEl.closest('.row');
+            if (row) row.remove();
+            agentEl = null;
+            started = false;
+            content = '';
+          }
           addHITL(ev.question || 'Please clarify:', ev.options || [], ev.allow_freetext !== false);
           interrupted = true; streaming = false; setDisabled(false); return;
         }
 
         if (t === 'chart') {
+          // Render the chart canvas immediately
           toolEls.filter(el => !el.classList.contains('done'))
             .forEach(el => markDone(el, 'Chart ready'));
           toolEls = [];
           addChart(ev.config);
-          discarding     = false;
+          // Mark that chart has fired — used by handleAfterThinking and done handler
           readyForAnswer = true;
-          thinkingText   = '';
           lastAnswerBuf  = '';
+          // If NOT inside a thinking block, exit discard so answer tokens stream
+          if (!inThinking) {
+            discarding   = false;
+            thinkingText = '';
+          }
+          // If inThinking=true, the thinking block will close naturally via </thinking>
+          // handleAfterThinking will then see readyForAnswer=true and start the answer
           continue;
         }
 
@@ -727,7 +761,7 @@ function addHITL(question, options, allowFreetext) {
   html += '<p class="hitl-q">' + esc(question) + '</p>';
   html += '<div class="hitl-opts">';
   options.forEach((opt, i) => {
-    html += '<button class="hitl-opt" onclick="chooseHITL(' + "'" + escA(opt) + "'" + ')">' +
+    html += '<button class="hitl-opt" onclick="chooseHITL(this,' + "'" + escA(opt) + "'" + ')">' +
             '<span class="hitl-num">' + (i+1) + '</span><span>' + esc(opt) + '</span></button>';
   });
   html += '</div>';
@@ -738,7 +772,20 @@ function addHITL(question, options, allowFreetext) {
   m.appendChild(el); scrollEnd();
 }
 
-function chooseHITL(opt) {
+function chooseHITL(btn, opt) {
+  // Highlight selected option in green, disable all buttons in this card
+  const card = btn.closest('.hitl-card');
+  if (card) {
+    card.querySelectorAll('.hitl-opt').forEach(b => {
+      b.style.pointerEvents = 'none';
+      b.style.opacity = '0.45';
+    });
+    btn.classList.add('picked');
+    btn.style.opacity = '1';
+    // Hide free-text hint
+    const free = card.querySelector('.hitl-free');
+    if (free) free.style.display = 'none';
+  }
   submit(opt);
 }
 
@@ -867,6 +914,17 @@ function clean(t) {
     if (realContent) t = parts.slice(parts.indexOf(realContent)).join('\n\n');
     else return '';
   }
+  // Remove duplicate paragraphs (sub-agent response echoed in supervisor summary)
+  const paras = t.split(/\n\n+/);
+  const seen = new Set();
+  const deduped = paras.filter(p => {
+    const key = p.trim().slice(0, 80).toLowerCase();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  t = deduped.join('\n\n');
+
   return t.trim();
 }
 function esc(s) {
