@@ -39,80 +39,67 @@ from core.middleware.semantic_cache import SemanticCacheMiddleware
 from core.middleware.episodic_memory import EpisodicMemoryMiddleware
 from core.cache import SemanticCache
 
-# ── Pharma-domain middleware ──────────────────────────────────────────────
-# CHANGED: agent.middleware.* → agents.supervisor.middleware.*
-from agents.supervisor.middleware.pii import DomainPIIMiddleware
-from agents.supervisor.middleware.content_filter import ContentFilterMiddleware
-from agents.supervisor.middleware.action_guardrail import ActionGuardrailMiddleware
+# ── Domain middleware ─────────────────────────────────────────────────────
 from agents.supervisor.middleware.output_guardrail import OutputGuardrailMiddleware
 
+# NOTE: ContentFilterMiddleware and DomainPIIMiddleware have been removed.
+# Bedrock Guardrails (configured in deploy.sh step_guardrails) now handles
+# both at the gateway layer before any message reaches the agent:
+#
+#   ContentFilterMiddleware (check_toxic regex)
+#     → replaced by Bedrock VIOLENCE + MISCONDUCT content filters (HIGH)
+#
+#   DomainPIIMiddleware (email/CC regex on input, email regex on output)
+#     → replaced by Bedrock sensitive info policy:
+#         INPUT:  EMAIL, PHONE, NAME, ADDRESS, DOB, SSN — ANONYMIZED/BLOCK
+#         OUTPUT: EMAIL — ANONYMIZED (added to guardrail config)
+#
+# This eliminates redundant checks and ensures a single enforcement point.
 
-def build_stack(domain: str, store, safety_llm, cache: SemanticCache) -> list:
+
+def build_stack(domain: str, store, cache: SemanticCache) -> list:
     """
-    Assemble the 9-layer middleware stack for the Supervisor Agent.
+    Assemble the middleware stack for the Supervisor Agent.
 
-    IDENTICAL to single agent build_stack() — same layers, same order,
-    same thresholds. Only import paths changed.
+    Layers removed vs original:
+      - DomainPIIMiddleware    → Bedrock input + output sensitive info policy
+      - ContentFilterMiddleware → Bedrock VIOLENCE/MISCONDUCT content filters
+      - OutputGuardrailMiddleware → enabled below (Bedrock output guardrail)
 
     Args:
-        domain:     "pharma" | "general"
-        store:      PineconeStore (episodic memory)
-        safety_llm: ChatOpenAI(gpt-4o-mini) (output guardrail)
-        cache:      SemanticCache (semantic cache)
+        domain:  "pharma" | "general"
+        store:   PineconeStore (episodic memory)
+        cache:   SemanticCache (semantic cache)
 
     Returns:
         Ordered list of middleware instances for create_agent(middleware=...).
     """
     return [
-        # Layer 1: Tracer — FIRST, records every request including cache hits
+        # Layer 1: Tracer — FIRST so every request is recorded
         TracerMiddleware(dynamodb_table_name=get_trace_table_name()),
 
-        # Layer 2: PII — EARLY, scrub before LLM, cache, or memory touches it
-        DomainPIIMiddleware(),
-
-        # Layer 3: Content Filter — block off-topic/toxic before LLM
-        ContentFilterMiddleware(),
-
-        # Layer 4: Semantic Cache — SHORT-CIRCUIT, skip layers 5-9 on hit
+        # Layer 2: Semantic Cache — short-circuit on cache hit
         SemanticCacheMiddleware(cache=cache),
 
-        # Layer 5: Episodic Memory — inject relevant past context
+        # Layer 3: Episodic Memory — inject relevant past context
         EpisodicMemoryMiddleware(store=store),
 
-        # Layer 6: Summarization — compress history at 8,000 tokens
+        # Layer 4: Summarization — compress long history
         SummarizationMiddleware(
             model   = "openai:gpt-4o-mini",
             trigger = ("tokens", 8_000),
             keep    = ("messages", 10),
         ),
 
-        # Layer 7: HITL — NOTE: HumanInTheLoopMiddleware is NOT here.
-        # HITL lives on the HITL Agent. The Supervisor routes to HITL Agent
-        # via hitl_agent @tool in a2a_tools.py.
-        # HumanInTheLoopMiddleware(interrupt_on={"clarify___ask_user_input": True}),
-
-        # Layer 8: Action Guardrail — DISABLED (same as single agent)
-        # ActionGuardrailMiddleware(),
-
-        # Layer 9: OutputGuardrailMiddleware DISABLED on Supervisor.
-        # Safety Agent handles faithfulness + consistency via A2A tool call.
-        # Running it here too causes double-evaluation and score leakage in stream.
-        # Re-enable after calibration with faithfulness_threshold=0.70.
-        # OutputGuardrailMiddleware(
-        #     llm                    = safety_llm,
-        #     faithfulness_threshold = 0.00,
-        #     confidence_threshold   = 0.00,
-        # ),
+        # Layer 5: Output Guardrail — Bedrock guardrail on final answer
+        OutputGuardrailMiddleware(),
     ]
 
 
 __all__ = [
     "TracerMiddleware",
-    "DomainPIIMiddleware",
-    "ContentFilterMiddleware",
     "SemanticCacheMiddleware",
     "EpisodicMemoryMiddleware",
-    "ActionGuardrailMiddleware",
     "OutputGuardrailMiddleware",
     "build_stack",
 ]

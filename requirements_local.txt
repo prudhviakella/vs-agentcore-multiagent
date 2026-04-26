@@ -1,9 +1,29 @@
-# requirements-local.txt
+# requirements_local.txt
 # =======================
-# Install this once for local development — covers all 6 agents.
-# Usage: python3.11 -m pip install -r requirements-local.txt
+# Local development dependencies — covers all 6 agents + platform.
 #
-# Individual agent requirements.txt files are for Docker builds only.
+# PYTHON VERSION REQUIREMENT: 3.11+
+# ----------------------------------
+# This project requires Python 3.11 or higher.
+# Python 3.8 (macOS system default) will NOT work.
+# langchain>=0.3.0, langgraph, bedrock-agentcore all require Python>=3.9+.
+# langgraph-checkpoint-postgres requires Python>=3.10+.
+#
+# Mac setup (one-time):
+#   brew install python@3.11
+#   python3.11 -m pip install -r requirements_local.txt
+#
+# Verify your Python version first:
+#   python3.11 --version   # should print Python 3.11.x
+#   which python3.11       # should NOT be /usr/bin/python3 (macOS system)
+#
+# If python3.11 is not found:
+#   brew install python@3.11
+#   echo 'export PATH="/opt/homebrew/opt/python@3.11/bin:$PATH"' >> ~/.zshrc
+#   source ~/.zshrc
+#
+# Individual agent requirements.txt files are for Docker builds only
+# (they install into the container). Do not use them for local dev.
 
 # ── Core agent framework ──────────────────────────────────────────────────
 bedrock-agentcore
@@ -16,22 +36,29 @@ langgraph-checkpoint-postgres
 # ── AWS ───────────────────────────────────────────────────────────────────
 boto3>=1.42.0
 botocore>=1.42.86
+watchtower>=3.0.0
 
 # ── OpenAI ────────────────────────────────────────────────────────────────
 openai>=2.0.0
 
-# ── Pinecone (Research + Chart agents) ───────────────────────────────────
+# ── Pinecone ─────────────────────────────────────────────────────────────
 pinecone>=6.0.0
 
-# ── Neo4j (Knowledge agent) ───────────────────────────────────────────────
+# ── Neo4j ────────────────────────────────────────────────────────────────
 neo4j>=5.28.1
 
-# ── Postgres (all agents — checkpointer) ─────────────────────────────────
+# ── Postgres (HITL checkpointer) ─────────────────────────────────────────
 psycopg[binary]>=3.1.0
 psycopg-pool>=3.2.0
 
-# ── HTTP (Supervisor LOCAL_MODE → sub-agents via httpx) ───────────────────
+# ── HTTP ─────────────────────────────────────────────────────────────────
 httpx>=0.27.0
+requests>=2.31.0
 
-# ── Pydantic ──────────────────────────────────────────────────────────────
+# ── Pydantic ─────────────────────────────────────────────────────────────
 pydantic>=2.0.0
+
+# ── Platform API (uvicorn) ────────────────────────────────────────────────
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9

@@ -105,6 +105,30 @@ resource "aws_ecs_cluster" "main" {
 # ── IAM ───────────────────────────────────────────────────────────────────
 # Copy from single agent main.tf — update resource names only
 
+# ── ECS Task Execution Role ────────────────────────────────────────────────
+# What ECS itself uses to pull the image from ECR and write logs.
+# Kept separate from the task role (principle of least privilege).
+resource "aws_iam_role" "ecs_execution" {
+  name = "${local.prefix}-ecs-execution"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
+      Principal = { Service = "ecs-tasks.amazonaws.com" }
+    }]
+  })
+}
+
+# Managed policy covers: ECR pull + CloudWatch Logs write
+resource "aws_iam_role_policy_attachment" "ecs_execution_managed" {
+  role       = aws_iam_role.ecs_execution.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+# ── ECS Task Role ──────────────────────────────────────────────────────────
+# What the platform application code uses at runtime.
+# DIFFERENT from execution role — only what the app code itself needs.
 resource "aws_iam_role" "ecs_task" {
   name = "${local.prefix}-ecs-task"
   assume_role_policy = jsonencode({
@@ -124,28 +148,59 @@ resource "aws_iam_role_policy" "ecs_task" {
     Version = "2012-10-17"
     Statement = [
       {
+        # Call Supervisor AgentCore Runtime (production mode)
+        Sid      = "InvokeSupervisor"
         Effect   = "Allow"
         Action   = ["bedrock-agentcore:InvokeAgentRuntime"]
         Resource = "arn:aws:bedrock-agentcore:${var.aws_region}:${local.account_id}:runtime/*"
       },
       {
+        # input_guardrail.py calls apply_guardrail() on every request (INPUT check)
+        # Without this every request fails at the platform gateway with AccessDenied
+        Sid      = "BedrockGuardrail"
+        Effect   = "Allow"
+        Action   = ["bedrock:ApplyGuardrail"]
+        Resource = "arn:aws:bedrock:${var.aws_region}:${local.account_id}:guardrail/*"
+      },
+      {
+        # SSM reads: guardrail config, trace table name, gateway URL
+        # kms:Decrypt required for SecureString SSM params (Pinecone API key)
+        Sid    = "SSMAndSecrets"
         Effect = "Allow"
         Action = [
-          "ssm:GetParameter", "ssm:GetParameters", "ssm:PutParameter",
+          "ssm:GetParameter",
+          "ssm:GetParameters",
           "secretsmanager:GetSecretValue",
-          "logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents",
-          "ecr:GetAuthorizationToken", "ecr:BatchCheckLayerAvailability",
-          "ecr:GetDownloadUrlForLayer", "ecr:BatchGetImage",
+          "kms:Decrypt",
         ]
         Resource = "*"
-      }
+      },
+      {
+        # /api/v1/clinical-trial/traces endpoint — reads DynamoDB trace table
+        Sid    = "DynamoDBTraces"
+        Effect = "Allow"
+        Action = [
+          "dynamodb:Scan",
+          "dynamodb:GetItem",
+          "dynamodb:Query",
+          "dynamodb:DescribeTable",
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "CloudWatchLogs"
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+          "logs:DescribeLogGroups",
+          "logs:DescribeLogStreams",
+        ]
+        Resource = "*"
+      },
     ]
   })
-}
-
-resource "aws_iam_role_policy_attachment" "ecs_task_execution" {
-  role       = aws_iam_role.ecs_task.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
 # ── Security Groups ───────────────────────────────────────────────────────
@@ -180,7 +235,7 @@ resource "aws_lb" "main" {
 
 resource "aws_lb_target_group" "platform" {
   name        = "${local.prefix}-platform"
-  port        = 8000
+  port        = 8080
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
   target_type = "ip"
@@ -302,12 +357,70 @@ resource "aws_dynamodb_table" "traces" {
   tags = { Name = "${local.prefix}-traces" }
 }
 
+
+# ── CloudWatch Log Groups ─────────────────────────────────────────────────
+# Pre-create all log groups so retention is enforced from first write.
+# Without explicit creation, Lambda and AgentCore auto-create groups
+# with no retention policy (logs accumulate indefinitely).
+
+# AgentCore agent log groups (written via watchtower in each agent app.py)
+resource "aws_cloudwatch_log_group" "agent_research" {
+  name              = "/agentcore/${local.prefix}/research-agent"
+  retention_in_days = 30
+}
+
+resource "aws_cloudwatch_log_group" "agent_knowledge" {
+  name              = "/agentcore/${local.prefix}/knowledge-agent"
+  retention_in_days = 30
+}
+
+resource "aws_cloudwatch_log_group" "agent_safety" {
+  name              = "/agentcore/${local.prefix}/safety-agent"
+  retention_in_days = 30
+}
+
+resource "aws_cloudwatch_log_group" "agent_chart" {
+  name              = "/agentcore/${local.prefix}/chart-agent"
+  retention_in_days = 30
+}
+
+resource "aws_cloudwatch_log_group" "agent_supervisor" {
+  name              = "/agentcore/${local.prefix}/supervisor-agent"
+  retention_in_days = 30
+}
+
+# Lambda MCP tool log groups (auto-created by Lambda without retention by default)
+resource "aws_cloudwatch_log_group" "lambda_search" {
+  name              = "/aws/lambda/${local.prefix}-search-tool"
+  retention_in_days = 14
+}
+
+resource "aws_cloudwatch_log_group" "lambda_graph" {
+  name              = "/aws/lambda/${local.prefix}-graph-tool"
+  retention_in_days = 14
+}
+
+resource "aws_cloudwatch_log_group" "lambda_hitl" {
+  name              = "/aws/lambda/${local.prefix}-hitl-tool"
+  retention_in_days = 14
+}
+
+resource "aws_cloudwatch_log_group" "lambda_summariser" {
+  name              = "/aws/lambda/${local.prefix}-summariser-tool"
+  retention_in_days = 14
+}
+
+resource "aws_cloudwatch_log_group" "lambda_chart" {
+  name              = "/aws/lambda/${local.prefix}-chart-tool"
+  retention_in_days = 14
+}
+
 # ── ECS: Platform ─────────────────────────────────────────────────────────
 # CHANGE: SSM_PREFIX updated to /vs-agentcore-multiagent/prod
 
 resource "aws_cloudwatch_log_group" "platform" {
   name              = "/ecs/${local.prefix}/platform"
-  retention_in_days = 7
+  retention_in_days = 30
 }
 
 resource "aws_ecs_task_definition" "platform" {
@@ -316,13 +429,13 @@ resource "aws_ecs_task_definition" "platform" {
   requires_compatibilities = ["FARGATE"]
   cpu                      = "256"
   memory                   = "512"
-  execution_role_arn       = aws_iam_role.ecs_task.arn
+  execution_role_arn       = aws_iam_role.ecs_execution.arn
   task_role_arn            = aws_iam_role.ecs_task.arn
 
   container_definitions = jsonencode([{
     name  = "platform"
     image = var.platform_image_uri
-    portMappings = [{ containerPort = 8000 }]
+    portMappings = [{ containerPort = 8080 }]
     environment = [
       { name = "AWS_REGION", value = var.aws_region },
       { name = "SSM_PREFIX", value = local.ssm_prefix }  # ← updated
@@ -352,7 +465,7 @@ resource "aws_ecs_service" "platform" {
   load_balancer {
     target_group_arn = aws_lb_target_group.platform.arn
     container_name   = "platform"
-    container_port   = 8000
+    container_port   = 8080
   }
 }
 
@@ -361,7 +474,7 @@ resource "aws_ecs_service" "platform" {
 
 resource "aws_cloudwatch_log_group" "ui" {
   name              = "/ecs/${local.prefix}/ui"
-  retention_in_days = 7
+  retention_in_days = 30
 }
 
 resource "aws_ecs_task_definition" "ui" {
@@ -370,7 +483,7 @@ resource "aws_ecs_task_definition" "ui" {
   requires_compatibilities = ["FARGATE"]
   cpu                      = "256"
   memory                   = "512"
-  execution_role_arn       = aws_iam_role.ecs_task.arn
+  execution_role_arn       = aws_iam_role.ecs_execution.arn
   task_role_arn            = aws_iam_role.ecs_task.arn
 
   container_definitions = jsonencode([{

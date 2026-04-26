@@ -27,15 +27,29 @@ import re
 import time
 
 import boto3
+import watchtower
 from bedrock_agentcore import BedrockAgentCoreApp, BedrockAgentCoreContext
 
 from agents.knowledge.agent import build_knowledge_agent
 from core.mcp_client import get_mcp_tools
 
+_LOG_GROUP = os.environ.get("LOG_GROUP_NAME", "/agentcore/vs-agentcore-ma/knowledge-agent")
+
 logging.basicConfig(
     level  = logging.INFO,
     format = "%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
+try:
+    _cw = watchtower.CloudWatchLogHandler(
+        log_group_name   = _LOG_GROUP,
+        boto3_client     = boto3.client("logs", region_name=os.environ.get("AWS_REGION", "us-east-1")),
+        create_log_group = True,
+    )
+    _cw.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
+    logging.getLogger().addHandler(_cw)
+except Exception:
+    pass  # local dev — no CloudWatch credentials
+
 log = logging.getLogger(__name__)
 
 app    = BedrockAgentCoreApp()

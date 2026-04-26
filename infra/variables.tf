@@ -22,9 +22,27 @@ variable "ui_image_uri"       { description = "UI ECR image URI" }
 # ── AgentCore runtime image URIs ───────────────────────────────────────────
 # Not used directly by Terraform (AgentCore runtimes created via AWS CLI)
 # Kept here for reference and for deploy.sh to read via terraform output
-variable "supervisor_image_uri" { description = "Supervisor Agent ECR image URI" }
-variable "research_image_uri"   { description = "Research Agent ECR image URI" }
-variable "knowledge_image_uri"  { description = "Knowledge Agent ECR image URI" }
-variable "hitl_image_uri"       { description = "HITL Agent ECR image URI" }
-variable "safety_image_uri"     { description = "Safety Agent ECR image URI" }
-variable "chart_image_uri"      { description = "Chart Agent ECR image URI" }
+variable "supervisor_image_uri" {
+  description = "Supervisor Agent ECR image URI"
+  default     = ""
+}
+variable "research_image_uri" {
+  description = "Research Agent ECR image URI"
+  default     = ""
+}
+variable "knowledge_image_uri" {
+  description = "Knowledge Agent ECR image URI"
+  default     = ""
+}
+variable "hitl_image_uri" {
+  description = "HITL Agent ECR image URI"
+  default     = ""
+}
+variable "safety_image_uri" {
+  description = "Safety Agent ECR image URI"
+  default     = ""
+}
+variable "chart_image_uri" {
+  description = "Chart Agent ECR image URI"
+  default     = ""
+}

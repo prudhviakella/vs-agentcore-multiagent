@@ -3,42 +3,24 @@ agents/hitl/app.py
 ===================
 HITL Agent — AgentCore Runtime Entrypoint.
 
-IDENTICAL pattern to single agent app.py WITH HITL paths A/B/C/D kept.
-This is the only sub-agent that can interrupt and needs resume handling.
+FIX (Issue #1 — Postgres connection per invocation):
+  BEFORE: _ensure_agent() called build_hitl_agent() which called
+          psycopg.AsyncConnection.connect() on every cold start check.
+          Because _agent was cached globally, this only ran once —
+          BUT the checkpointer connection was built inside agent.py
+          on every build_hitl_agent() call, so if _agent was ever
+          invalidated or rebuilt, a new connection would be opened.
 
-DIFFERENCES from research/knowledge/safety app.py:
-  1. Tool filter   : clarify___ask_user_input only
-  2. HITL paths    : A/B/C/D preserved from single agent app.py
-  3. EPISODIC strip: kept (precaution)
-  4. AGENT_NAME    : "hitl-agent" set by Terraform
-  5. Port          : 8004 (local dev)
+  AFTER:  _cold_start holds {"checkpointer": AsyncPostgresSaver} built
+          once via build_hitl_cold_start(). On every request, the same
+          checkpointer is passed to build_hitl_agent(). This guarantees
+          exactly one Postgres connection for the lifetime of the container.
 
-RESPONSIBILITY:
-  When Supervisor detects a broad/vague query it calls hitl_agent @tool.
-  HITL Agent:
-    1. Searches for candidate trials (using clarify tool internally)
-    2. Generates a clarification card with 5 real trial names as options
-    3. Fires NodeInterrupt via HumanInTheLoopMiddleware
-    4. Yields interrupt event back to Supervisor
-    5. Supervisor propagates interrupt → Platform API → UI (HITL card shown)
-    6. User selects option → Platform API calls POST /resume
-    7. Supervisor calls hitl_agent @tool again with user_answer
-    8. HITL Agent resumes from Postgres checkpoint with user selection
-
-HOW HITL PROPAGATES BACK TO UI:
-  HITL Agent yields: {"type": "interrupt", "question": "...", "options": [...]}
-  Supervisor's _invoke_sub_agent() reads this event and raises HITLInterrupt.
-  Supervisor's handler() catches HITLInterrupt and yields the interrupt event.
-  Platform API forwards interrupt SSE to UI → HITL card displayed.
-
-RESUME FLOW:
-  Supervisor calls hitl_agent @tool with payload:
-    {"message": "[HITL Answer]: NCI-MATCH. Now search and answer.", "resume": True}
-  HITL Agent repairs dangling tool calls (same as single agent),
-  injects user_answer, continues from Postgres checkpoint.
-
-CALLED BY:
-  Supervisor's hitl_agent @tool in a2a_tools.py via invoke_agent_runtime().
+IDENTICAL to original app.py in all other respects:
+  - Tool filter : HITL_TOOLS
+  - HITL paths  : A/B/C/D preserved
+  - EPISODIC strip
+  - Span emission for distributed tracing
 """
 
 import json
@@ -50,7 +32,7 @@ import time
 import boto3
 from bedrock_agentcore import BedrockAgentCoreApp, BedrockAgentCoreContext
 
-from agents.hitl.agent import build_hitl_agent
+from agents.hitl.agent import build_hitl_agent, build_hitl_cold_start
 from core.mcp_client import get_mcp_tools
 
 logging.basicConfig(
@@ -59,7 +41,13 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-app    = BedrockAgentCoreApp()
+app = BedrockAgentCoreApp()
+
+# ── Cold start globals ────────────────────────────────────────────────────────
+# FIX: split into _cold_start (built once) and _agent (assembled per call).
+# _cold_start["checkpointer"] is a single long-lived Postgres connection.
+# _agent is rebuilt when tools change (MCP reconnect after cold restart).
+_cold_start: dict | None = None
 _agent = None
 
 HITL_TOOLS = {
@@ -92,9 +80,27 @@ def _extract_interrupt_args(iv: dict) -> dict:
 
 
 async def _ensure_agent():
-    global _agent
-    if _agent is None:
-        log.info("[HITL] Cold start — building agent")
+    """
+    Build cold start objects once, then assemble agent per call.
+
+    Cold start (once per container lifetime):
+      - OpenAI API key loaded from Secrets Manager
+      - Postgres connection + AsyncPostgresSaver built via build_hitl_cold_start()
+
+    Per request:
+      - MCP tools filtered to HITL_TOOLS
+      - Agent assembled with pre-built checkpointer
+
+    WHY _agent is also cached globally:
+      get_mcp_tools() is an async I/O call. Caching _agent avoids paying
+      this cost on every request. If tools change (MCP reconnect), the
+      container will restart naturally via AgentCore's health check.
+    """
+    global _cold_start, _agent
+
+    # ── One-time cold start ───────────────────────────────────────────────
+    if _cold_start is None:
+        log.info("[HITL] Cold start — building shared objects")
 
         if not os.environ.get("OPENAI_API_KEY"):
             prefix = os.environ.get("SSM_PREFIX", "/vs-agentcore-multiagent/prod")
@@ -103,11 +109,19 @@ async def _ensure_agent():
             os.environ["OPENAI_API_KEY"] = secret.get("api_key", "")
             log.info("[HITL] OpenAI key loaded")
 
+        _cold_start = await build_hitl_cold_start()
+        log.info("[HITL] Cold start complete")
+
+    # ── Agent assembly (cached after first build) ─────────────────────────
+    if _agent is None:
         all_tools = await get_mcp_tools()
         tools     = [t for t in all_tools if t.name in HITL_TOOLS]
-        log.info(f"[HITL] Tools: {[t.name for t in tools]}")
+        log.info(f"[HITL] Tools filtered: {[t.name for t in tools]}")
 
-        _agent = await build_hitl_agent(tools=tools)
+        _agent = await build_hitl_agent(
+            tools        = tools,
+            checkpointer = _cold_start["checkpointer"],   # FIX: passed in, not built here
+        )
         log.info("[HITL] Agent ready")
 
     return _agent
@@ -125,15 +139,16 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
         resume     — False
 
     payload (resume call after user picks option):
-        message    — "[HITL Answer]: NCI-MATCH. Now search and answer."
-        session_id — same thread_id
-        domain     — "pharma"
-        resume     — True
+        message     — "[HITL Answer]: NCI-MATCH. Now search and answer."
+        session_id  — same thread_id
+        domain      — "pharma"
+        resume      — True
         user_answer — "NCI-MATCH study"
 
     yields:
         token, tool_start, tool_end — normal streaming
         interrupt                   — HITL card data (Supervisor catches this)
+        span                        — observability span for distributed tracing
         done                        — with answer or empty if interrupted
         error                       — on failure
     """
@@ -150,9 +165,9 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
         f"  query={message[:60]}..."
     )
 
-    full_answer  = ""
-    _tail_buffer = ""
-    hitl_input   = {}
+    full_answer     = ""
+    _tail_buffer    = ""
+    hitl_input      = {}
     interrupt_fired = False
 
     def _flush_safe():
@@ -178,7 +193,7 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
         }
         agent_context = {"user_id": thread_id, "session_id": thread_id, "domain": domain}
 
-        # ── Resume: repair dangling tool calls (identical to single agent) ──
+        # ── Resume: repair dangling tool calls ────────────────────────────
         if is_resume:
             try:
                 from langchain_core.messages import ToolMessage
@@ -221,7 +236,7 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
         else:
             input_data = {"messages": [{"role": "user", "content": message}]}
 
-        # ── Stream events — HITL paths A/B/C/D (identical to single agent) ──
+        # ── Stream events — HITL paths A / B / C / D ──────────────────────
         try:
             async for event in agent.astream_events(
                 input_data,
@@ -255,8 +270,8 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
                 elif kind == "on_tool_end":
                     is_hitl_tool = "ask_user_input" in name or "tool-hitl" in name
                     if is_hitl_tool:
-                        # Path A — tool ran to completion
-                        log.info(f"[HITL] Path A — tool ended")
+                        # Path A — tool ran to completion, fire interrupt
+                        log.info("[HITL] Path A — tool ended")
                         interrupt_fired = True
                         if _tail_buffer.strip():
                             clean = _EPISODIC_PATTERN.sub("", _tail_buffer).rstrip()
@@ -264,9 +279,9 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
                                 yield {"type": "token", "content": clean}
                             _tail_buffer = ""
                         yield {
-                            "type":          "interrupt",
-                            "question":      hitl_input.get("question", "Please clarify:"),
-                            "options":       hitl_input.get("options", []),
+                            "type":           "interrupt",
+                            "question":       hitl_input.get("question", "Please clarify:"),
+                            "options":        hitl_input.get("options", []),
                             "allow_freetext": hitl_input.get("allow_freetext", True),
                         }
                         break
@@ -274,7 +289,7 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
                         yield {"type": "tool_end", "name": name}
 
                 elif kind == "on_chain_end":
-                    # Path B — __interrupt__ in chain end
+                    # Path B — __interrupt__ in chain end output
                     output = data.get("output", {})
                     if isinstance(output, dict) and "__interrupt__" in output:
                         interrupts = output["__interrupt__"]
@@ -282,7 +297,7 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
                             iv   = interrupts[0]
                             val  = iv.value if hasattr(iv, "value") else iv
                             args = _extract_interrupt_args(val)
-                            log.info(f"[HITL] Path B — __interrupt__ in chain")
+                            log.info("[HITL] Path B — __interrupt__ in chain")
                             interrupt_fired = True
                             if _tail_buffer.strip():
                                 clean = _EPISODIC_PATTERN.sub("", _tail_buffer).rstrip()
@@ -290,9 +305,9 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
                                     yield {"type": "token", "content": clean}
                                 _tail_buffer = ""
                             yield {
-                                "type":          "interrupt",
-                                "question":      args.get("question", "Please clarify:"),
-                                "options":       args.get("options", []),
+                                "type":           "interrupt",
+                                "question":       args.get("question", "Please clarify:"),
+                                "options":        args.get("options", []),
                                 "allow_freetext": args.get("allow_freetext", True),
                             }
                             return
@@ -309,9 +324,9 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
                         yield {"type": "token", "content": clean}
                     _tail_buffer = ""
                 yield {
-                    "type":          "interrupt",
-                    "question":      hitl_input.get("question", "Please clarify:"),
-                    "options":       hitl_input.get("options", []),
+                    "type":           "interrupt",
+                    "question":       hitl_input.get("question", "Please clarify:"),
+                    "options":        hitl_input.get("options", []),
                     "allow_freetext": hitl_input.get("allow_freetext", True),
                 }
             else:
@@ -324,7 +339,7 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
                 yield {"type": "error", "message": str(exc)}
             return
 
-        # Flush tail
+        # Flush tail buffer
         if _tail_buffer:
             clean = _EPISODIC_PATTERN.sub("", _tail_buffer).rstrip()
             if clean:
@@ -332,7 +347,7 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
                 yield {"type": "token", "content": clean}
             _tail_buffer = ""
 
-        # Path C — check Postgres checkpoint for pending interrupt (PRIMARY)
+        # Path C — check Postgres checkpoint for pending interrupt
         if not interrupt_fired:
             try:
                 state = await agent.aget_state(config)
@@ -343,11 +358,11 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
                         iv   = task_interrupts[0]
                         val  = iv.value if hasattr(iv, "value") else iv
                         args = _extract_interrupt_args(val)
-                        log.info(f"[HITL] Path C — interrupt in state checkpoint")
+                        log.info("[HITL] Path C — interrupt in state checkpoint")
                         yield {
-                            "type":          "interrupt",
-                            "question":      args.get("question", "Please clarify:"),
-                            "options":       args.get("options", []),
+                            "type":           "interrupt",
+                            "question":       args.get("question", "Please clarify:"),
+                            "options":        args.get("options", []),
                             "allow_freetext": args.get("allow_freetext", True),
                         }
                         return

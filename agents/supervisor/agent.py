@@ -3,40 +3,20 @@ agents/supervisor/agent.py
 ===========================
 Supervisor Agent assembly.
 
-IDENTICAL to vs-agentcore-platform-aws/agent/agent.py with ONE difference:
-  tools = build_a2a_tools(session_id, domain, token_queue)
-          instead of MCP tools from get_mcp_tools()
+Builds the Supervisor Agent per request from cold-start objects.
+Heavy objects (checkpointer, store, cache) are built once and reused.
+A2A tools are rebuilt per request — they capture session_id + token_queue
+in a closure so streaming events route back to the right handler.
 
-Everything else is identical:
-  - Full 9-layer middleware stack via build_stack()
-  - AsyncPostgresSaver (HITL resume lives on Supervisor)
-  - SemanticCache + PineconeStore (cache + episodic memory on Supervisor)
-  - Safety LLM gpt-4o-mini for OutputGuardrailMiddleware
-  - AgentContext schema
-  - get_bedrock_prompt(AGENT_NAME) where AGENT_NAME="supervisor-agent"
+Middleware stack (5 layers):
+  TracerMiddleware         — DynamoDB observability, per-request tracing
+  SemanticCacheMiddleware  — short-circuit on cache hit
+  EpisodicMemoryMiddleware — inject relevant past session context
+  SummarizationMiddleware  — compress long conversation history
+  OutputGuardrailMiddleware — Bedrock guardrail check on final answer
 
-WHY FULL MIDDLEWARE ON SUPERVISOR ONLY?
-  The 9-layer middleware stack handles cross-cutting concerns:
-    TracerMiddleware      — observability (DynamoDB traces)
-    PIIMiddleware         — strip PII before anything touches it
-    ContentFilter         — block off-topic queries
-    SemanticCache         — return cached answers (skip all sub-agents)
-    EpisodicMemory        — inject past context
-    Summarization         — compress long history
-    HumanInTheLoop        — NOT HERE (lives on HITL Agent)
-    OutputGuardrail       — faithfulness + consistency on final answer
-                           (Safety Agent handles this via A2A)
-
-  Sub-agents are lean — they only do their specialised task.
-  This avoids running 9 middleware layers × 5 sub-agents per request.
-
-NOTE ON build_agent SIGNATURE:
-  Unlike the single agent, build_supervisor_agent() takes session_id,
-  domain, and token_queue as arguments because the A2A tools need them
-  at construction time (captured in closure).
-  This means build_supervisor_agent() is called PER REQUEST not once
-  at cold start — but only the tool closures are rebuilt, the heavy
-  objects (checkpointer, store, cache, LLM) are cached globally in app.py.
+PII filtering, content filtering, and prompt injection are handled upstream
+by the Bedrock Guardrail at the platform gateway (input_guardrail.py).
 """
 
 import logging
@@ -45,7 +25,7 @@ from typing import Any
 
 import psycopg
 from langchain.agents import create_agent
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_openai import OpenAIEmbeddings
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from agents.supervisor.middleware import build_stack
@@ -66,52 +46,48 @@ AGENT_NAME = os.environ.get("AGENT_NAME", "supervisor-agent")
 
 
 async def build_supervisor_agent(
-    session_id:  str,
-    domain:      str,
-    token_queue: Any,  # asyncio.Queue
-    # Heavy objects passed in from app.py (built once at cold start)
-    checkpointer: Any,
-    store:        Any,
-    cache:        Any,
-    safety_llm:   Any,
+    session_id:   str,
+    domain:       str,
+    token_queue:  Any,    # asyncio.Queue — sub-agent events routed here
+    checkpointer: Any,    # AsyncPostgresSaver — HITL resume + thread history
+    store:        Any,    # PineconeStore — episodic memory
+    cache:        Any,    # SemanticCache — semantic cache
 ) -> Any:
     """
     Assemble the Supervisor Agent for one request.
 
-    Heavy objects (checkpointer, store, cache, safety_llm) are built
-    once at cold start in app.py and passed in here.
-    A2A tools are rebuilt per request to capture session_id + token_queue.
-
-    Args:
-        session_id:   User thread_id for this request.
-        domain:       "pharma".
-        token_queue:  asyncio.Queue — sub-agent tokens put here for re-streaming.
-        checkpointer: AsyncPostgresSaver built at cold start.
-        store:        PineconeStore built at cold start.
-        cache:        SemanticCache built at cold start.
-        safety_llm:   ChatOpenAI(gpt-4o-mini) built at cold start.
+    Called per request — only A2A tool closures are rebuilt.
+    Heavy objects (checkpointer, store, cache) come from cold start.
 
     Returns:
-        Compiled LangChain agent ready for astream_events().
+        Compiled LangGraph agent ready for astream_events().
     """
-    # A2A tools — rebuilt per request (session_id + token_queue in closure)
     tools = build_a2a_tools(
         session_id  = session_id,
         domain      = domain,
         token_queue = token_queue,
     )
 
-    # Middleware stack — same as single agent, same build_stack() call
     middleware = build_stack(
-        domain     = domain,
-        store      = store,
-        safety_llm = safety_llm,
-        cache      = cache,
+        domain = domain,
+        store  = store,
+        cache  = cache,
     )
 
-    # System prompt from Bedrock Prompt Management
-    # AGENT_NAME="supervisor-agent" reads /supervisor-agent/prod/bedrock/prompt_id
+    # Fetch prompt from Bedrock Prompt Management.
+    # SSM is read on every call so a version bump takes effect without restart.
     system_prompt = get_bedrock_prompt(AGENT_NAME)
+
+    # Runtime execution policy appended separately so changing retry limits
+    # does not require a prompt version bump in Bedrock.
+    system_prompt += (
+        "\n\n---\n"
+        "## Execution policy\n"
+        "Maximum attempts per sub-task: 3\n"
+        "Maximum total tool calls this request: 20\n"
+        "After 3 failed attempts on a sub-task, move on and state what could not be verified.\n"
+        "Never retry a sub-agent with an identical query that already failed.\n"
+    )
 
     agent = create_agent(
         model          = "gpt-4o",
@@ -124,10 +100,9 @@ async def build_supervisor_agent(
     )
 
     log.info(
-        f"[Supervisor Agent] Built"
-        f"  agent_name={AGENT_NAME}"
+        f"[Supervisor] Agent built"
         f"  tools={[t.name for t in tools]}"
-        f"  middleware={len(middleware)} layers"
+        f"  middleware={len(middleware)}"
         f"  session={session_id[:8]}"
     )
     return agent
@@ -135,25 +110,17 @@ async def build_supervisor_agent(
 
 async def build_supervisor_cold_start() -> dict:
     """
-    Build all heavy objects at cold start. Called once in app.py _ensure_agent().
-    Returns a dict of reusable objects passed to build_supervisor_agent() per request.
+    Build heavy objects once at container cold start.
+    Returned dict is unpacked via **kwargs into build_supervisor_agent() per request.
 
     Returns:
-        {
-          "checkpointer": AsyncPostgresSaver,
-          "store":        PineconeStore,
-          "cache":        SemanticCache,
-          "safety_llm":   ChatOpenAI,
-        }
+        {"checkpointer": AsyncPostgresSaver, "store": PineconeStore, "cache": SemanticCache}
     """
-    # Embedder — used by SemanticCache + PineconeStore (episodic memory)
     embedder = OpenAIEmbeddings(model="text-embedding-3-small")
 
-    # Pinecone — same index, different namespaces for cache vs episodic memory
     pinecone_index = init_pinecone_index()
-    store          = PineconeStore(index=pinecone_index, embedder=embedder)
+    store = PineconeStore(index=pinecone_index, embedder=embedder)
 
-    # SemanticCache — pharma: 0.97 threshold (strict for clinical safety)
     cache = SemanticCache(
         index                = pinecone_index,
         embedder             = embedder,
@@ -161,7 +128,6 @@ async def build_supervisor_cold_start() -> dict:
         namespace            = "cache_pharma",
     )
 
-    # Postgres checkpointer — HITL resume + thread history
     conn = await psycopg.AsyncConnection.connect(
         init_postgres_url(),
         autocommit=True,
@@ -169,14 +135,10 @@ async def build_supervisor_cold_start() -> dict:
     checkpointer = AsyncPostgresSaver(conn)
     await checkpointer.setup()
 
-    # Safety LLM — gpt-4o-mini for OutputGuardrailMiddleware
-    safety_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-
-    log.info("[Supervisor] Cold start objects built: checkpointer + store + cache + safety_llm")
+    log.info("[Supervisor] Cold start complete — checkpointer + store + cache ready")
 
     return {
         "checkpointer": checkpointer,
         "store":        store,
         "cache":        cache,
-        "safety_llm":   safety_llm,
     }

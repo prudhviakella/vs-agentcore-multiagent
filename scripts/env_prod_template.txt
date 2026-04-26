@@ -1,0 +1,36 @@
+export AWS_REGION=us-east-1
+export AWS_ACCOUNT_ID=CHANGE_ME
+export SSM_PREFIX=/vs-agentcore-multiagent/prod
+
+export AGENT_ENV=prod
+export LOCAL_MODE=false
+
+export OPENAI_API_KEY=sk-...
+
+# ── Pinecone ────────────────────────────────────────────────────────────────
+export PINECONE_API_KEY=pcsk_...
+export PINECONE_INDEX_NAME=clinical-agent
+export CLINICAL_TRIALS_INDEX=clinical-trials-index
+
+# ── Neo4j ───────────────────────────────────────────────────────────────────
+export NEO4J_URI=neo4j+s://CHANGE_ME.databases.neo4j.io
+export NEO4J_USER=CHANGE_ME
+export NEO4J_PASSWORD=CHANGE_ME
+
+# ── Platform ────────────────────────────────────────────────────────────────
+export PLATFORM_API_KEY=vs-CHANGE_ME
+
+# ── RDS Postgres ─────────────────────────────────────────────────────────────
+export RDS_PASSWORD=CHANGE_ME
+export POSTGRES_URL=postgresql://postgres:CHANGE_ME@CHANGE_ME.rds.amazonaws.com:5432/clinical_agent
+
+# ── Terraform ───────────────────────────────────────────────────────────────
+export TF_STATE_BUCKET=vs-agentcore-ma-tfstate
+
+# ── Sub-agent URLs (populated by deploy.sh ssm-arns after agents deploy) ────
+export RESEARCH_AGENT_URL=
+export KNOWLEDGE_AGENT_URL=
+export HITL_AGENT_URL=
+export SAFETY_AGENT_URL=
+export CHART_AGENT_URL=
+export SUPERVISOR_AGENT_URL=

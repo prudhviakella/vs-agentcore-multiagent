@@ -3,9 +3,10 @@
 # =============================================
 # Multi-agent deployment. Steps:
 #
-#   ./scripts/deploy.sh prompts    # Step 0: create 6 Bedrock prompts → SSM
-#   ./scripts/deploy.sh secrets    # Step 1: push secrets + SSM params
-#   ./scripts/deploy.sh iam        # Step 2: IAM roles (same as single agent)
+#   ./scripts/deploy.sh prompts      # Step 0: create Bedrock prompts → SSM
+#   ./scripts/deploy.sh secrets      # Step 1: push secrets + SSM params
+#   ./scripts/deploy.sh iam          # Step 2: IAM roles
+#   ./scripts/deploy.sh guardrails   # Step 2b: Bedrock Guardrail (denied topics + content filters → SSM)
 #   ./scripts/deploy.sh lambdas    # Step 3: build + deploy 5 Lambda tools (+ chart)
 #   ./scripts/deploy.sh gateway    # Step 4: MCP Gateway + 5 targets (+ chart)
 #   ./scripts/deploy.sh platform   # Step 5: Terraform (ECS, ALB, RDS)
@@ -129,9 +130,9 @@ run_or_warn() {
 }
 
 # All 6 agents — sub-agents first, supervisor last
-AGENTS=(research knowledge hitl safety chart supervisor)
+AGENTS=(research knowledge safety chart supervisor)
 # Sub-agents only (Supervisor deployed last in step_agents)
-SUB_AGENTS=(research knowledge hitl safety chart)
+SUB_AGENTS=(research knowledge safety chart)
 
 echo "================================================"
 echo "VS AgentCore Multi-Agent — ${ACTION}"
@@ -194,7 +195,8 @@ deploy_runtime() {
   local agent_role="arn:aws:iam::${ACCOUNT_ID}:role/${PREFIX}-agent-role"
 
   # ENV_JSON: SSM_PREFIX, AWS_REGION, AGENT_NAME (KEY DIFFERENCE — drives prompt + config)
-  local env_json="{\"SSM_PREFIX\":\"${SSM_PREFIX}\",\"AWS_REGION\":\"${REGION}\",\"AWS_DEFAULT_REGION\":\"${REGION}\",\"AGENT_ENV\":\"prod\",\"AGENT_NAME\":\"${agent_name}-agent\"}"
+  local log_group="/agentcore/${PREFIX}/${agent_name}-agent"
+  local env_json="{\"SSM_PREFIX\":\"${SSM_PREFIX}\",\"AWS_REGION\":\"${REGION}\",\"AWS_DEFAULT_REGION\":\"${REGION}\",\"AGENT_ENV\":\"prod\",\"AGENT_NAME\":\"${agent_name}-agent\",\"LOG_GROUP_NAME\":\"${log_group}\"}"
 
   echo ""
   echo "  ── ${agent_name} agent"
@@ -252,6 +254,202 @@ deploy_runtime() {
     --region "${REGION}" > /dev/null
   echo "  ✅ SSM: ${SSM_PREFIX}/agents/${agent_name}/runtime_arn"
   track "agentcore-runtime" "${agent_name}-agent" "${runtime_arn}"
+}
+
+
+# ── Step 2b: Bedrock Guardrail ────────────────────────────────────────────
+# Creates ONE guardrail for the platform with:
+#   - Denied topic: personal medical advice to individual patients
+#   - Content filters: HATE, VIOLENCE, SEXUAL, MISCONDUCT, PROMPT_ATTACK (all HIGH)
+#   - PROMPT_ATTACK on INPUT only — not output
+# Writes guardrail_id + guardrail_version to SSM.
+# The platform gateway reads these to call ApplyGuardrail on input + output.
+
+step_guardrails() {
+  echo ""
+  echo "► Step 2b: Bedrock Guardrail"
+
+  python3 - << PYEOF
+import boto3, json, sys
+
+region     = "${REGION}"
+ssm_prefix = "${SSM_PREFIX}"
+bedrock    = boto3.client("bedrock", region_name=region)
+ssm        = boto3.client("ssm",     region_name=region)
+
+GUARDRAIL_NAME = "${PREFIX}-guardrail"
+
+# ── Check if guardrail already exists ─────────────────────────────────────
+existing_id = None
+try:
+    existing_id = ssm.get_parameter(
+        Name=f"{ssm_prefix}/bedrock/guardrail_id"
+    )["Parameter"]["Value"]
+    if existing_id in ("", "CHANGE_ME"):
+        existing_id = None
+except ssm.exceptions.ParameterNotFound:
+    pass
+
+if existing_id:
+    print(f"  Guardrail exists ({existing_id}) — creating new version...")
+    try:
+        ver_resp = bedrock.create_guardrail_version(
+            guardrailIdentifier=existing_id,
+            description="Updated by deploy.sh"
+        )
+        guardrail_id      = existing_id
+        guardrail_version = str(ver_resp["version"])
+        print(f"  New version: {guardrail_version}")
+    except Exception as e:
+        print(f"  ⚠️  Could not create new version: {e}")
+        guardrail_id      = existing_id
+        guardrail_version = ssm.get_parameter(
+            Name=f"{ssm_prefix}/bedrock/guardrail_version"
+        )["Parameter"]["Value"]
+else:
+    print(f"  Creating guardrail: {GUARDRAIL_NAME}")
+    resp = bedrock.create_guardrail(
+        name=GUARDRAIL_NAME,
+        description="VS AgentCore clinical trial research platform — input + output guardrail",
+
+        # ── Denied topics ──────────────────────────────────────────────────
+        # Two topics: one blocks dangerous OUTPUT, one blocks off-topic INPUT.
+        # Both are evaluated on both source types — Bedrock applies the right
+        # one based on what the content actually contains.
+        topicPolicyConfig={
+            "topicsConfig": [
+                {
+                    # OUTPUT guardrail — blocks prescriptive medical advice in responses
+                    "name": "PersonalMedicalAdvice",
+                    "definition": (
+                        "Providing direct medical advice, treatment instructions, medication dosages, "
+                        "injection guidance, or recommendations for a patient to start, stop, or change "
+                        "medication, or to enroll in or withdraw from a clinical trial based on their "
+                        "individual health condition."
+                    ),
+                    "examples": [
+                        "You should take 500mg of metformin daily before enrolling.",
+                        "Stop your current medication at least two weeks before the trial.",
+                        "Based on your symptoms, I recommend enrolling in this trial.",
+                        "Administer 2.5mg IV over 30 minutes.",
+                        "You should increase your dose to manage these side effects.",
+                    ],
+                    "type": "DENY"
+                },
+                {
+                    # INPUT guardrail — blocks queries unrelated to clinical research
+                    # Keeps the platform focused and prevents misuse as a general-purpose assistant.
+                    "name": "OffTopicQuery",
+                    "definition": (
+                        "Questions or requests that are unrelated to clinical trials, pharmaceutical "
+                        "research, drug development, medical research studies, or biomedical science. "
+                        "This includes general knowledge questions, coding help, creative writing, "
+                        "financial advice, or any topic outside the clinical research domain."
+                    ),
+                    "examples": [
+                        "Write me a poem about the ocean.",
+                        "What is the stock price of Pfizer today?",
+                        "Help me write a Python function to sort a list.",
+                        "What is the weather in New York?",
+                        "Who won the football match last night?",
+                    ],
+                    "type": "DENY"
+                }
+            ]
+        },
+
+        # ── Content filters ────────────────────────────────────────────────
+        # PROMPT_ATTACK: INPUT only — detects jailbreaks and prompt injection attempts.
+        #   Replaces the unhooked check_prompt_injection() regex in core/guardrails.py.
+        #   outputStrength NONE because prompt injection is an input-side attack.
+        # All other harmful content filters apply to both input and output.
+        contentPolicyConfig={
+            "filtersConfig": [
+                {"type": "HATE",          "inputStrength": "HIGH", "outputStrength": "HIGH"},
+                {"type": "INSULTS",       "inputStrength": "HIGH", "outputStrength": "HIGH"},
+                {"type": "SEXUAL",        "inputStrength": "HIGH", "outputStrength": "HIGH"},
+                {"type": "VIOLENCE",      "inputStrength": "HIGH", "outputStrength": "HIGH"},
+                {"type": "MISCONDUCT",    "inputStrength": "HIGH", "outputStrength": "HIGH"},
+                {"type": "PROMPT_ATTACK", "inputStrength": "HIGH", "outputStrength": "NONE"},
+            ]
+        },
+
+        # ── Sensitive information filter (INPUT + OUTPUT) ─────────────────
+        # INPUT: redacts researcher-entered patient identifiers before they
+        #   reach the LLM, get logged to DynamoDB, or appear in traces.
+        #   Replaces DomainPIIMiddleware.before_agent regex.
+        # OUTPUT: redacts email addresses that may appear in model responses
+        #   (e.g. investigator contacts from protocol documents).
+        #   Replaces DomainPIIMiddleware.after_agent regex.
+        sensitiveInformationPolicyConfig={
+            "piiEntitiesConfig": [
+                {"type": "NAME",            "action": "ANONYMIZED"},
+                {"type": "EMAIL",           "action": "ANONYMIZED"},
+                {"type": "PHONE",           "action": "ANONYMIZED"},
+                {"type": "US_SOCIAL_SECURITY_NUMBER", "action": "BLOCK"},
+                {"type": "DATE_OF_BIRTH",   "action": "ANONYMIZED"},
+                {"type": "ADDRESS",         "action": "ANONYMIZED"},
+            ]
+        },
+
+        # ── Contextual grounding ──────────────────────────────────────────
+        # Detects hallucinations by checking if the output is grounded in
+        # the source documents passed as grounding_source in the OUTPUT call.
+        # output_guardrail.py passes retrieved Pinecone chunks as grounding_source.
+        # Threshold 0.7 = block if less than 70% of the answer is grounded.
+        contextualGroundingPolicyConfig={
+            "filtersConfig": [
+                {"type": "GROUNDING",  "threshold": 0.7},
+                {"type": "RELEVANCE",  "threshold": 0.7},
+            ]
+        },
+
+        # ── User-facing block messages ─────────────────────────────────────
+        blockedInputMessaging=(
+            "Your request could not be processed. It either contains prohibited content "
+            "or is outside the scope of this clinical trial research platform. "
+            "Please ask a question related to clinical trials or pharmaceutical research."
+        ),
+        blockedOutputsMessaging=(
+            "This response was blocked by the content safety guardrail. "
+            "Please consult a qualified healthcare professional for personal medical advice."
+        ),
+    )
+
+    guardrail_id  = resp["guardrailId"]
+    guardrail_arn = resp["guardrailArn"]
+    print(f"  Created: {guardrail_id}")
+    print(f"  ARN:     {guardrail_arn}")
+
+    ver_resp      = bedrock.create_guardrail_version(
+        guardrailIdentifier=guardrail_id,
+        description="Initial version — deploy.sh"
+    )
+    guardrail_version = str(ver_resp["version"])
+
+# ── Write to SSM ──────────────────────────────────────────────────────────
+# Platform gateway + OutputGuardrailMiddleware read these at cold start.
+ssm.put_parameter(
+    Name=f"{ssm_prefix}/bedrock/guardrail_id",
+    Value=guardrail_id,
+    Type="String",
+    Overwrite=True,
+)
+ssm.put_parameter(
+    Name=f"{ssm_prefix}/bedrock/guardrail_version",
+    Value=guardrail_version,
+    Type="String",
+    Overwrite=True,
+)
+
+print(f"  ✅ SSM: {ssm_prefix}/bedrock/guardrail_id      = {guardrail_id}")
+print(f"  ✅ SSM: {ssm_prefix}/bedrock/guardrail_version = {guardrail_version}")
+print("")
+print("  Guardrail done ✅")
+PYEOF
+
+  GUARDRAIL_ID=$(aws ssm get-parameter     --name "${SSM_PREFIX}/bedrock/guardrail_id"     --query "Parameter.Value" --output text 2>/dev/null || echo "")
+  [ -n "${GUARDRAIL_ID}" ] && track "bedrock-guardrail" "${PREFIX}-guardrail" "${GUARDRAIL_ID}"
 }
 
 
@@ -580,6 +778,12 @@ JSON
       "Effect": "Allow",
       "Action": ["bedrock:GetPrompt"],
       "Resource": "*"
+    },
+    {
+      "Sid": "BedrockGuardrail",
+      "Effect": "Allow",
+      "Action": ["bedrock:ApplyGuardrail"],
+      "Resource": "arn:aws:bedrock:${REGION}:${ACCOUNT_ID}:guardrail/*"
     },
     {
       "Sid": "DynamoDB",
@@ -962,7 +1166,7 @@ step_agents() {
       --no-cache \
       -t "${tag}" \
       --build-arg AGENT_NAME="${agent}" \
-      "${ROOT}/agents/${agent}" \
+      --file "${ROOT}/Dockerfile" "${ROOT}" \
       || { echo "  ❌ Docker build failed for ${agent} — skipping"; return 1; }
     echo "  ✅ Pushed: ${tag}"
     echo "${tag}"
@@ -974,7 +1178,6 @@ step_agents() {
     case "${agent}" in
       research)  desc="Research Agent — Pinecone semantic search + GPT-4o synthesis" ;;
       knowledge) desc="Knowledge Agent — Neo4j Cypher queries" ;;
-      hitl)      desc="HITL Agent — clarification + NodeInterrupt" ;;
       safety)    desc="Safety Agent — faithfulness + consistency evaluation" ;;
       chart)     desc="Chart Agent — Chart.js generation from trial data" ;;
     esac
@@ -1199,6 +1402,17 @@ step_check() {
     check_fail "RDS not available (status: ${RDS_STATUS}) — run: ./scripts/deploy.sh platform"
   fi
 
+  # ── Bedrock Guardrail ─────────────────────────────────────────────────
+  echo ""
+  echo "  ── Bedrock Guardrail"
+  GUARDRAIL_ID=$(aws ssm get-parameter     --name "${SSM_PREFIX}/bedrock/guardrail_id"     --query "Parameter.Value" --output text 2>/dev/null || echo "")
+  GUARDRAIL_VER=$(aws ssm get-parameter     --name "${SSM_PREFIX}/bedrock/guardrail_version"     --query "Parameter.Value" --output text 2>/dev/null || echo "")
+  if [ -n "${GUARDRAIL_ID}" ] && [ -n "${GUARDRAIL_VER}" ]; then
+    check_ok "guardrail_id=${GUARDRAIL_ID}  version=${GUARDRAIL_VER}"
+  else
+    check_fail "Bedrock Guardrail not found — run: ./scripts/deploy.sh guardrails"
+  fi
+
   # ── DynamoDB trace table ───────────────────────────────────────────────
   echo ""
   echo "  ── DynamoDB"
@@ -1269,9 +1483,10 @@ case "${ACTION}" in
   platform)  step_platform ;;
   plan)      step_platform ;;
   agents)    step_agents   ;;
-  ssm-arns)  step_ssm_arns ;;
-  registry)  step_registry  ;;
-  redeploy)  step_redeploy "$@" ;;
+  ssm-arns)    step_ssm_arns   ;;
+  registry)    step_registry    ;;
+  guardrails)  step_guardrails  ;;
+  redeploy)    step_redeploy "$@" ;;
 
   all)
     # ORDER:
@@ -1287,6 +1502,7 @@ case "${ACTION}" in
     step_prompts
     step_secrets
     step_iam
+    step_guardrails
     step_lambdas
     step_gateway
     step_platform
@@ -1317,7 +1533,8 @@ case "${ACTION}" in
   *)
     echo "Usage: $0 {check|prompts|secrets|iam|lambdas|gateway|platform|agents|ssm-arns|redeploy|all|plan|destroy}"
     echo ""
-    echo "  check     — Verify all secrets, prompts, gateway, lambdas, RDS, IAM"
+    echo "  check       — Verify all secrets, prompts, guardrail, gateway, lambdas, RDS, IAM"
+    echo "  guardrails  — Create Bedrock Guardrail (denied topic + content filters) → SSM"
     echo "              Also auto-copies MCP gateway URL from single agent if found"
     echo "  prompts   — Create 6 Bedrock prompts (one per agent) → SSM"
     echo "  agents    — Build + deploy 6 AgentCore Runtimes (sub-agents first, supervisor last)"

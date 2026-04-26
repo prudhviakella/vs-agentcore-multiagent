@@ -28,6 +28,7 @@ from gateway.auth import verify_api_key, _get_api_key
 from gateway.rate_limiter import RateLimiter
 from gateway.schemas import ChatRequest, ResumeRequest
 from gateway.logging_mw import LoggingMiddleware
+from gateway.input_guardrail import check_input_guardrail
 
 logging.basicConfig(
     level  = logging.INFO,
@@ -129,6 +130,17 @@ async def chat(
 
     if not rate_limiter.allow(user_id):
         raise HTTPException(status_code=429, detail="Rate limit exceeded.")
+
+    # ── Input guardrail ───────────────────────────────────────────────────
+    # Checks user message against Bedrock Guardrail (source="INPUT") before
+    # the message reaches any agent. Catches: prompt injection (PROMPT_ATTACK),
+    # off-topic queries (OffTopicQuery), harmful content, and PII in queries.
+    # Fails open if Bedrock is unavailable so a service disruption doesn't
+    # block legitimate research queries.
+    blocked, block_reason = check_input_guardrail(body.message)
+    if blocked:
+        log.warning(f"[PLATFORM] Input guardrail blocked  request_id={request_id}  reason={block_reason[:80]}")
+        raise HTTPException(status_code=400, detail=block_reason)
 
     payload = {
         "message":   body.message,

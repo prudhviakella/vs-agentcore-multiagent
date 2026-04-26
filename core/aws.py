@@ -90,6 +90,11 @@ def init_pinecone_index() -> Any:
 # ── Postgres ───────────────────────────────────────────────────────────────────
 
 def init_postgres_url() -> str:
+    # Check env var first — allows local dev override via --postgres-url flag
+    # without touching Secrets Manager
+    env_url = os.environ.get("POSTGRES_URL")
+    if env_url:
+        return env_url
     secret = get_secret_json(f"clinical-agent/{ENV}/postgres")
     from urllib.parse import quote_plus
     return (

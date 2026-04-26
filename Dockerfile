@@ -8,15 +8,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
 ARG AGENT_NAME
 ENV AGENT_NAME=${AGENT_NAME}
 
+# Each agent has its own requirements.txt
 COPY agents/${AGENT_NAME}/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy agent module + shared core
+# Copy the specific agent module
 COPY agents/${AGENT_NAME}/ ./agents/${AGENT_NAME}/
+
+# Copy shared core (middleware, tools, AWS utils)
 COPY core/ ./core/
 
 EXPOSE 8000
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s \
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s \
     CMD curl -f http://localhost:8000/health || exit 1
 
 CMD python -m agents.${AGENT_NAME}.app

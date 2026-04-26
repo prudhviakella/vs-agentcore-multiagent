@@ -92,7 +92,6 @@ import os
 import time
 import threading
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
 from langchain.agents.middleware import AgentState, hook_config
@@ -126,9 +125,14 @@ MAX_ANSWER_CHARS      = 50_000   # full answer — used for fine-tuning datasets
 _SUMMARY_PREFIX = "Here is a summary of the conversation to date"
 _HITL_PREFIX    = "[HITL Answer]:"
 
-# GPT-4o pricing (per 1M tokens) — update if pricing changes
-_GPT4O_INPUT_COST_PER_1M  = 2.50
-_GPT4O_OUTPUT_COST_PER_1M = 10.00
+# Per-model pricing (per 1M tokens). Add new models here as needed.
+_MODEL_COST_TABLE: dict[str, tuple[float, float]] = {
+    "gpt-4o":           (2.50, 10.00),
+    "gpt-4o-mini":      (0.15,  0.60),
+    "gpt-4o-2024-11-20":(2.50, 10.00),
+    "gpt-4o-mini-2024-07-18": (0.15, 0.60),
+}
+_DEFAULT_COST = (2.50, 10.00)  # fallback for unknown models
 
 # ── Class-level annotation registry ──────────────────────────────────────────
 # Used by other middleware to annotate traces without coupling to instance state.
@@ -207,7 +211,6 @@ class TracerMiddleware(BaseAgentMiddleware):
         self._ddb_table       = None
         self._ddb_table_ready = False
         self._ddb_table_lock  = threading.Lock()
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tracer-ddb")
 
         # Read prompt version once at cold start — doesn't change during container lifetime
         self._prompt_version = self._read_prompt_version()
@@ -286,11 +289,20 @@ class TracerMiddleware(BaseAgentMiddleware):
         if run_id not in self._llm_timings:
             self._llm_timings[run_id] = []
 
+        # Capture model name from response metadata for per-model cost calculation
+        model_name = "unknown"
+        for msg in reversed(state.get("messages", [])):
+            if isinstance(msg, AIMessage):
+                meta = getattr(msg, "response_metadata", {}) or {}
+                model_name = meta.get("model_name") or meta.get("model") or "unknown"
+                break
+
         self._llm_timings[run_id].append({
             "turn":          turn_idx + 1,
             "elapsed_ms":    elapsed_ms,
             "input_tokens":  input_tokens,
             "output_tokens": output_tokens,
+            "model":         model_name,
         })
         return None
 
@@ -348,11 +360,12 @@ class TracerMiddleware(BaseAgentMiddleware):
         trace["input_tokens"]   = total_input
         trace["output_tokens"]  = total_output
         trace["total_tokens"]   = total_input + total_output
-        trace["token_cost_usd"] = round(
-            (total_input  / 1_000_000) * _GPT4O_INPUT_COST_PER_1M +
-            (total_output / 1_000_000) * _GPT4O_OUTPUT_COST_PER_1M,
-            6
-        )
+        total_cost = 0.0
+        for t in llm_timings:
+            inp_rate, out_rate = _MODEL_COST_TABLE.get(t.get("model", ""), _DEFAULT_COST)
+            total_cost += (t.get("input_tokens",  0) / 1_000_000) * inp_rate
+            total_cost += (t.get("output_tokens", 0) / 1_000_000) * out_rate
+        trace["token_cost_usd"] = round(total_cost, 6)
 
         # ── Identity and prompt version ───────────────────────────────────
         trace["user_id"]        = ctx.get("user_id",    "anonymous")
@@ -361,31 +374,9 @@ class TracerMiddleware(BaseAgentMiddleware):
         trace["prompt_version"] = self._prompt_version
         trace["agent_name"]     = os.environ.get("AGENT_NAME", "unknown")
 
-        # ── Observability service ─────────────────────────────────────────
-        try:
-            from langsmith import get_current_run_tree
-            run_tree = get_current_run_tree()
-            if run_tree:
-                trace["observability"] = "langsmith"
-                trace["run_tree_url"]  = run_tree.url
-        except (ImportError, Exception):
-            pass
-
-        if "observability" not in trace:
-            try:
-                import mlflow
-                if mlflow.get_active_run():
-                    mlflow.log_metrics({
-                        "agent_latency_ms": elapsed,
-                        "total_tokens":     trace["total_tokens"],
-                        "token_cost_usd":   trace["token_cost_usd"],
-                    })
-                    trace["observability"] = "mlflow"
-            except (ImportError, Exception):
-                pass
-
-        if "observability" not in trace:
-            trace["observability"] = "local"
+        # Observability: traces always go to DynamoDB + CloudWatch (via watchtower)
+        trace["observability"] = "dynamodb"
+        trace["log_group"]     = os.environ.get("LOG_GROUP_NAME", "")
 
         log.info(
             f"[TRACER] T={elapsed:.0f}ms  run_complete"
@@ -402,7 +393,7 @@ class TracerMiddleware(BaseAgentMiddleware):
         )
 
         self._cache_trace(run_id, trace)
-        self._persist_async(trace)
+        self._write_trace(trace)   # synchronous — reliable in AgentCore container lifecycle
         return None
 
     # ─────────────────────────────────────────────────────── trace cache ──────
@@ -430,11 +421,6 @@ class TracerMiddleware(BaseAgentMiddleware):
                 )
                 self._ddb_table_ready = True
         return self._ddb_table
-
-    def _persist_async(self, trace: dict) -> None:
-        if not self._table_name:
-            return
-        self._executor.submit(self._write_trace, dict(trace))
 
     def _write_trace(self, trace: dict) -> None:
         try:
@@ -586,7 +572,9 @@ class TracerMiddleware(BaseAgentMiddleware):
                 answer = str(msg.content)
 
         # ── Derived fields ─────────────────────────────────────────────────
-        cache_hit = bool(answer) and len(tools) == 0
+        # cache_hit is set by SemanticCacheMiddleware via update_trace().
+        # Do NOT derive it here — len(tools)==0 is also true for failed requests.
+        cache_hit = False  # default; overridden by annotation if cache fired
 
         # Sub-agent routing summary (Supervisor traces)
         sub_agents_called = list(dict.fromkeys(

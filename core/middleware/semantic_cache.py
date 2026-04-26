@@ -11,9 +11,32 @@ SEMANTIC CACHING:
   Embeds query as vector, finds cached vectors above cosine similarity
   threshold (0.97 pharma, 0.88 general). Same question rephrased still hits.
 
-BRIDGE DESIGN — scalar not dict:
-  AgentCore: one request per container → no concurrency → scalar is safe.
-  FastAPI/Gunicorn: concurrent requests → use dict keyed by run_id instead.
+FIX (Issue #2 — instance state breaks under concurrency):
+  BEFORE: Scalar instance state — one value per middleware INSTANCE.
+    self._human_message: Optional[str] = None
+    self._user_id:       str           = "anonymous"
+
+    AgentCore runs one request per container → scalars were safe there.
+    But if this middleware is used in FastAPI (concurrent requests on the
+    same process), two requests sharing the same middleware instance would
+    corrupt each other's bridge values:
+
+      Request A sets  self._human_message = "metformin dose?"
+      Request B sets  self._human_message = "trial enrollment?"
+      Request A's after_agent reads "trial enrollment?" → writes wrong answer to cache
+      Request B's after_agent reads None (already cleared) → skips cache write
+
+  AFTER: Dict bridge keyed by run_id — one entry per in-flight request.
+    self._bridge: dict[str, dict] = {}   # run_id → {question, user_id}
+
+    Each request stores and retrieves its own values using the stable
+    run_id from BaseAgentMiddleware._get_run_id(). Concurrent requests
+    can't see each other's values.
+
+    The dict is cleaned up by .pop() in after_agent — no memory leak.
+
+  This fix makes the middleware safe in BOTH AgentCore (1 request/container)
+  AND FastAPI/Gunicorn (concurrent requests per process).
 
 FIRE-AND-FORGET WRITE:
   Pinecone write runs in background daemon thread after response is sent.
@@ -36,7 +59,7 @@ TRACER INTEGRATION:
 
 import logging
 import threading
-from typing import Any, Optional
+from typing import Any
 
 from langchain.agents.middleware import AgentState, hook_config
 from core.middleware.base import BaseAgentMiddleware
@@ -55,17 +78,19 @@ class SemanticCacheMiddleware(BaseAgentMiddleware):
     """
     Two-hook middleware: cache lookup (before_agent) and cache write (after_agent).
 
-    Instance state (scalars — safe on AgentCore, see module docstring):
-      _cache          — SemanticCache (Pinecone-backed)
-      _human_message  — bridge: before → after
-      _user_id        — bridge: before → after
+    FIX: Instance state is now a dict keyed by run_id instead of scalars.
+    This makes the middleware safe under concurrent requests (FastAPI/Gunicorn)
+    while remaining backward-compatible with AgentCore's one-request-per-container model.
+
+    Instance state:
+      _cache   — SemanticCache (Pinecone-backed, shared across requests)
+      _bridge  — dict[run_id, {question, user_id}] — per-request bridge data
     """
 
     def __init__(self, cache: SemanticCache):
         super().__init__()
-        self._cache:         SemanticCache  = cache
-        self._human_message: Optional[str] = None
-        self._user_id:       str           = "anonymous"
+        self._cache:  SemanticCache       = cache
+        self._bridge: dict[str, dict]     = {}   # FIX: was two scalars, now one dict
 
     @hook_config(can_jump_to=["end"])
     def before_agent(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
@@ -80,54 +105,50 @@ class SemanticCacheMiddleware(BaseAgentMiddleware):
 
         HIT → return cached AIMessage + jump_to="end"
               Annotates trace: cache_hit=True, cache_namespace
-        MISS → return None, stash question for after_agent
+        MISS → return None, store question in self._bridge[run_id] for after_agent
         """
-        run_id         = self._get_run_id(runtime)
-        messages       = state.get("messages", [])
+        run_id   = self._get_run_id(runtime)
+        messages = state.get("messages", [])
+
         human_messages = [m for m in messages if getattr(m, "type", None) == "human"]
 
         if not human_messages:
-            self._human_message = None
+            # No bridge entry → after_agent will skip write
             return None
 
         if len(human_messages) > 1:
             # Multi-turn: cache lookup without full context would return wrong answer
-            log.debug(f"[CACHE_MW] skip — multi-turn ({len(human_messages)} human messages)")
-            self._human_message = None
+            log.debug(f"[CACHE_MW] skip — multi-turn ({len(human_messages)} human messages)  run={run_id[:8]}")
             return None
 
         question = str(human_messages[0].content).strip()
         if not question:
-            self._human_message = None
             return None
 
-        user_id = (getattr(runtime, "context", None) or {}).get("user_id", "anonymous")
-        self._human_message = question
-        self._user_id       = user_id
-        log.debug(f"[CACHE_MW] lookup  user={user_id}  question='{question[:80]}'")
+        ctx     = getattr(runtime, "context", None) or {}
+        user_id = ctx.get("user_id", "anonymous")
+
+        log.debug(f"[CACHE_MW] lookup  run={run_id[:8]}  user={user_id}  question='{question[:80]}'")
 
         try:
             cached = self._cache.lookup(question, user_id=user_id)
 
             if cached:
-                log.info(f"[CACHE_MW] HIT  user={user_id}  answer_len={len(cached)}")
-                self._human_message = None   # clear bridge — no write needed on HIT
-
-                # Annotate trace with cache hit details
-                # cache_namespace tells us which Pinecone namespace served the hit
-                # Useful for debugging: "cache_pharma" vs "cache_general"
+                log.info(f"[CACHE_MW] HIT  run={run_id[:8]}  user={user_id}  answer_len={len(cached)}")
+                # No bridge entry needed on HIT — after_agent must not write to cache again
                 TracerMiddleware.update_trace(run_id, {
                     "cache_hit":       True,
                     "cache_namespace": getattr(self._cache, "namespace", "unknown"),
                 })
-
                 return {"messages": [AIMessage(content=cached)], "jump_to": "end"}
 
-            log.debug(f"[CACHE_MW] MISS  user={user_id}")
+            log.debug(f"[CACHE_MW] MISS  run={run_id[:8]}  user={user_id}")
 
         except Exception as exc:
-            log.warning(f"[CACHE_MW] lookup error  user={user_id}  error={exc} — treating as MISS")
+            log.warning(f"[CACHE_MW] lookup error  run={run_id[:8]}  user={user_id}  error={exc} — treating as MISS")
 
+        # MISS — store bridge data so after_agent can write the answer to cache
+        self._bridge[run_id] = {"question": question, "user_id": user_id}
         return None
 
     @hook_config(can_jump_to=[])
@@ -135,24 +156,25 @@ class SemanticCacheMiddleware(BaseAgentMiddleware):
         """
         Cache write — store LLM answer for future hits.
 
-        Clears bridge values immediately (before early returns) to prevent
-        stale values leaking between requests.
+        FIX: reads bridge data from self._bridge.pop(run_id) instead of
+        scalar instance attributes. .pop() cleans up the entry immediately
+        — no leak even if after_agent is called without a matching before_agent.
 
         SKIP CONDITIONS (no write):
-          1. No question stored (multi-turn, empty, or cache HIT)
+          1. No bridge entry for this run_id (multi-turn, HIT, or empty question)
           2. No AI answer in state
           3. Answer is a guardrail fallback (never cache error responses)
         """
-        question = self._human_message
-        user_id  = self._user_id
+        run_id = self._get_run_id(runtime)
 
-        # Clear bridge before any early return — prevents stale state
-        self._human_message = None
-        self._user_id       = "anonymous"
-
-        if not question:
-            log.debug("[CACHE_MW] after_agent skip — no question (multi-turn or HIT)")
+        # FIX: pop is atomic — prevents stale data leaking to other requests
+        bridge = self._bridge.pop(run_id, None)
+        if not bridge:
+            log.debug(f"[CACHE_MW] after_agent skip — no bridge entry  run={run_id[:8]}")
             return None
+
+        question = bridge["question"]
+        user_id  = bridge["user_id"]
 
         answer = ""
         for msg in reversed(state.get("messages", [])):
@@ -161,15 +183,15 @@ class SemanticCacheMiddleware(BaseAgentMiddleware):
                 break
 
         if not answer:
-            log.debug(f"[CACHE_MW] after_agent skip — no AI answer  user={user_id}")
+            log.debug(f"[CACHE_MW] after_agent skip — no AI answer  run={run_id[:8]}  user={user_id}")
             return None
 
         # Never cache guardrail fallbacks — would permanently block similar queries
         if _GUARDRAIL_FALLBACK_MARKER in answer:
-            log.info(f"[CACHE_MW] skip — guardrail fallback, not caching  user={user_id}")
+            log.info(f"[CACHE_MW] skip — guardrail fallback, not caching  run={run_id[:8]}  user={user_id}")
             return None
 
-        log.debug(f"[CACHE_MW] storing  user={user_id}  question='{question[:80]}'")
+        log.debug(f"[CACHE_MW] storing  run={run_id[:8]}  user={user_id}  question='{question[:80]}'")
 
         # daemon=True: does not block container shutdown
         threading.Thread(
