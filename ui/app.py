@@ -370,49 +370,82 @@ async function doResume(ans) {
 //   done
 //
 // States:
-//   THINKING  inThinking=true    accumulate in thinkingText, show in reasoning card
+//   THINKING  inThinking=true    accumulate in blockBuf, shown in reasoning card
 //   PREBUF    !inThinking&&!started  buffer tokens looking for <thinking>
 //     - discarding=true: drop junk, keep last 12 chars for tag detection
 //                        AND accumulate in lastAnswerBuf (for done-flush)
-//     - discarding=false: accumulate in thinkingText (plain answer buffer)
+//     - discarding=false: accumulate in prebuf (plain answer buffer)
 //   ANSWER    started=true       stream tokens to answer bubble
 //
 async function sse(url, payload) {
   streaming = true;
   setDisabled(true);
 
-  let toolEls        = [addToolStep('Thinking…', true)];
-  let agentEl        = null;
-  let content        = '';
-  let latency        = 0;
-  let started        = false;
-  let inThinking     = false;
-  let thinkingText   = '';   // thinking card buffer OR plain-answer pre-buffer
-  let thinkingEl     = null;
-  let discarding     = false;
-  let toolActive     = false;  // true while between tool_start and tool_end — discard tokens
-  let readyForAnswer = false; // set by chart event
-  let lastAnswerBuf  = '';   // tokens since last tool_start, for done-flush fallback
+  // ── State — each variable has ONE purpose ────────────────────────────────
+  let agentEl      = null;   // answer bubble DOM element
+  let content      = '';     // accumulated answer text
+  let latency      = 0;
+  let started      = false;  // answer bubble has been opened
 
-  // ── helpers ──────────────────────────────────────────────────────────────
+  // Thinking card state
+  let cardEl       = null;   // single reasoning card (never recreated once made)
+  let cardText     = '';     // full cumulative text in card (grows, never reset)
+  let blockBuf     = '';     // current <thinking> block being streamed (reset per block)
+  let inThinking   = false;  // currently inside <thinking>...</thinking>
+
+  // Pre-buffer — accumulates tokens until we know where to route them
+  let prebuf       = '';
+
+  // Tool / flow control
+  let toolActive     = false; // between tool_start and tool_end
+  let discarding     = false; // junk tokens — drop them
+  let readyForAnswer = false; // chart fired — next non-thinking content is the answer
+  let lastAnswerBuf  = '';    // fallback: tokens captured during tool execution
+
+  // ── Persistent status indicator — always visible while processing ─────────
+  // One spinner that stays until the answer starts or an error occurs
+  const statusEl = addToolStep('Analysing…', true);
+
+  // ── Thinking card helpers ─────────────────────────────────────────────────
+  function openThinkingBlock() {
+    if (!cardEl) {
+      cardEl = addThinkingCard();
+      cardText = '';
+    } else {
+      if (cardText) cardText += '\n\n—\n\n';
+      reopenThinkingCard(cardEl);
+    }
+    blockBuf   = '';
+    inThinking = true;
+  }
+
+  function appendThinking(chunk) {
+    blockBuf += chunk;
+    // Strip partial closing tag from live display
+    const display = (cardText + blockBuf).replace(/<\/?t(h(i(n(k(i(n(g?)?)?)?)?)?)?)?>?$/i, '');
+    updateThinkingCard(cardEl, display);
+  }
+
+  function sealThinkingBlock() {
+    cardText  += blockBuf;
+    blockBuf   = '';
+    inThinking = false;
+    updateThinkingCard(cardEl, cardText);
+    sealThinkingCard(cardEl);
+  }
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
   const isToolCallJson = s => (
-    // Raw tool call syntax
     /^[\s\n]*(multi_tool_use|functions\.|\{|\[)/.test(s) ||
-    // LLM narration before calling a tool ("Let me use...", "I will call...", etc.)
     /^[\s\n]*(Let me (use|call|check|retrieve|query|now|first)|I will (use|call|now|first)|I\'ll (use|call|now)|I need to (use|call|retrieve))/i.test(s)
   );
 
-  function enterDiscard(bufSeed) {
-    discarding   = true;
-    thinkingText = bufSeed ? bufSeed.slice(-12) : '';
-    toolEls.filter(el => !el.classList.contains('done')).forEach(el => markDone(el, 'Done'));
-    toolEls = [];
-    toolEls.push(addToolStep('Processing…', true));
+  function removeStatus() {
+    if (statusEl && statusEl.parentNode) statusEl.remove();
   }
 
   function startAnswer(firstChunk) {
-    toolEls.filter(el => !el.classList.contains('done')).forEach(el => markDone(el, 'Done'));
-    toolEls = [];
+    removeStatus();
     agentEl  = addAgentBubble();
     started  = true;
     content += firstChunk;
@@ -420,42 +453,41 @@ async function sse(url, payload) {
   }
 
   function handleAfterThinking(afterRaw) {
-    // Called after </thinking> seals — decide what to do with remaining content
-    const afterTrimmed = afterRaw.trim();
+    const after = afterRaw.trim();
 
-    // If chart already fired, the answer starts next regardless of afterRaw content
+    // Chart already fired — any non-junk content is the final answer
     if (readyForAnswer) {
       readyForAnswer = false;
-      discarding     = false;
-      thinkingText   = '';
-      if (afterTrimmed && !afterTrimmed.startsWith('<') && !isToolCallJson(afterRaw)) {
-        startAnswer(afterTrimmed);
+      if (after && !after.startsWith('<') && !isToolCallJson(afterRaw)) {
+        startAnswer(after);
       }
-      // Otherwise answer will start on the next token in PREBUF
+      // else: answer will arrive on next token in PREBUF
       return;
     }
 
-    if (!afterTrimmed || isToolCallJson(afterRaw)) {
-      enterDiscard(afterTrimmed);
-    } else if (afterTrimmed.startsWith('<thinking>')) {
-      inThinking   = true;
-      if (!thinkingEl) {
-        thinkingEl = addThinkingCard();
-      } else {
-        // Reopen existing card — append separator
-        reopenThinkingCard(thinkingEl);
-        thinkingText = thinkingText + '\n\n---\n\n';
-      }
-      thinkingText += afterTrimmed.slice('<thinking>'.length);
-      updateThinkingCard(thinkingEl, thinkingText);
-    } else if (afterTrimmed.startsWith('<')) {
-      enterDiscard(afterTrimmed);          // partial tag e.g. '<t'
-    } else if (/^(Case [A-D]|Where |Target:|Plan:|Q[123]\.|Note:|Step )/.test(afterTrimmed)) {
-      // Thinking content leaked after </thinking> split — discard it
-      enterDiscard(afterTrimmed);
-    } else {
-      startAnswer(afterTrimmed);           // real answer text
+    if (!after || isToolCallJson(afterRaw)) {
+      discarding = true; prebuf = after.slice(-12);
+      return;
     }
+    if (after.startsWith('<thinking>')) {
+      openThinkingBlock();
+      const rest = after.slice('<thinking>'.length);
+      if (rest.includes('</thinking>')) {
+        const [blk, ...tail] = rest.split('</thinking>');
+        blockBuf = blk;
+        sealThinkingBlock();
+        lastAnswerBuf = '';
+        handleAfterThinking(tail.join('</thinking>'));
+      } else {
+        appendThinking(rest);
+      }
+      return;
+    }
+    if (after.startsWith('<') || /^(Case [A-D]|Where |Target:|Plan:|Q[123]\.|Note:|Step )/.test(after)) {
+      discarding = true; prebuf = after.slice(-12);
+      return;
+    }
+    startAnswer(after);
   }
 
   try {
@@ -467,14 +499,14 @@ async function sse(url, payload) {
 
     const reader  = resp.body.getReader();
     const decoder = new TextDecoder();
-    let   buf     = '';
+    let   rawBuf  = '';
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      const lines = buf.split('\n');
-      buf = lines.pop();
+      rawBuf += decoder.decode(value, { stream: true });
+      const lines = rawBuf.split('\n');
+      rawBuf = lines.pop();
 
       for (const line of lines) {
         if (!line.startsWith('data: ')) continue;
@@ -483,14 +515,13 @@ async function sse(url, payload) {
         let ev; try { ev = JSON.parse(raw); } catch { continue; }
         const t = ev.type || '';
 
-        // ── Non-token events ───────────────────────────────────────────────
+        // ── Events ────────────────────────────────────────────────────────
         if (t === 'tool_start') {
-          if (toolEls.length === 1 && toolEls[0].classList.contains('thinking')) {
-            toolEls[0].remove(); toolEls = [];
+          // Update spinner label — don't remove it
+          if (statusEl && statusEl.parentNode) {
+            statusEl.querySelector('span:last-child').textContent = 'Analysing…';
           }
-          toolEls.push(addToolStep(toolLabel(ev.name), true));
           toolActive = true;
-          // Tear down any answer bubble opened from pre-tool tokens
           if (started && agentEl) {
             const row = agentEl.closest('.row');
             if (row) row.remove();
@@ -501,52 +532,41 @@ async function sse(url, payload) {
         }
 
         if (t === 'tool_end') {
-          const active = toolEls.filter(el => !el.classList.contains('done'));
-          if (active.length > 0) markDone(active[active.length-1], toolLabel(ev.name));
-          toolActive = false;
+          toolActive    = false;
           lastAnswerBuf = '';
           continue;
         }
 
         if (t === 'interrupt') {
-          toolEls.filter(el => !el.classList.contains('done'))
-            .forEach(el => markDone(el, 'Clarification needed'));
-          toolEls = [];
+          removeStatus();
           lastAnswerBuf = '';
-          thinkingText  = '';
-          // Remove any answer bubble that opened from narration tokens before interrupt
+          prebuf        = '';
           if (agentEl) {
             const row = agentEl.closest('.row');
             if (row) row.remove();
-            agentEl = null;
-            started = false;
-            content = '';
+            agentEl = null; started = false; content = '';
           }
           addHITL(ev.question || 'Please clarify:', ev.options || [], ev.allow_freetext !== false);
+          // Add "Clarification needed" indicator
+          const cl = addToolStep('Clarification needed', false);
+          cl.classList.add('done');
           interrupted = true; streaming = false; setDisabled(false); return;
         }
 
         if (t === 'chart') {
-          // Render the chart canvas immediately
-          toolEls.filter(el => !el.classList.contains('done'))
-            .forEach(el => markDone(el, 'Chart ready'));
-          toolEls = [];
           addChart(ev.config);
-          // Mark that chart has fired — used by handleAfterThinking and done handler
           readyForAnswer = true;
           lastAnswerBuf  = '';
-          // If NOT inside a thinking block, exit discard so answer tokens stream
-          if (!inThinking) {
-            discarding   = false;
-            thinkingText = '';
-          }
-          // If inThinking=true, the thinking block will close naturally via </thinking>
-          // handleAfterThinking will then see readyForAnswer=true and start the answer
+          prebuf         = '';
+          if (!inThinking) discarding = false;
+          // Add "Chart ready" indicator
+          const cr = addToolStep('Chart ready', false);
+          cr.classList.add('done');
           continue;
         }
 
         if (t === 'error') {
-          toolEls.forEach(el => el.remove()); toolEls = [];
+          removeStatus();
           addErr(ev.message || 'Unknown error');
           break;
         }
@@ -554,40 +574,25 @@ async function sse(url, payload) {
         if (t === 'done') {
           latency = ev.latency_ms || 0;
           if (!started && !inThinking) {
-            // Try to display something — in priority order:
-            // 1. Plain buffer (resume flow, no thinking, no discarding)
-            const plain = thinkingText.trim();
-            // 2. Last captured tokens after final tool_end (early-close pattern)
-            const fallback = lastAnswerBuf.trim();
-            const answer = (plain && !discarding) ? plain : fallback;
-            if (answer) {
-              toolEls.filter(el => !el.classList.contains('done')).forEach(el => markDone(el, 'Done'));
-              toolEls = [];
-              agentEl  = addAgentBubble();
-              started  = true;
-              content += answer;
-              streamToken(agentEl, content);
-            }
+            const answer = (prebuf.trim() && !discarding) ? prebuf.trim() : lastAnswerBuf.trim();
+            if (answer) startAnswer(answer);
           }
-          if (inThinking && thinkingEl) {
-            sealThinkingCard(thinkingEl);
-            thinkingEl = null; inThinking = false;
-          }
+          if (inThinking && cardEl) sealThinkingBlock();
           continue;
         }
 
-        // ── Token ──────────────────────────────────────────────────────────
+        // ── Token ─────────────────────────────────────────────────────────
         const token = ev.content || ev.result || ev.token || '';
         if (!token) continue;
 
-        // Detect base64 image — chart agent returns PNG as data URI
+        // Base64 image from chart agent
         if (token.includes('data:image/') && token.includes('base64,')) {
           if (!agentEl) { agentEl = addAgentBubble(); started = true; }
           const wrap = document.createElement('div');
           wrap.style.cssText = 'margin:12px 0;max-width:100%';
-          const img = document.createElement('img');
-          const b64 = token.match(/data:image\/[^;]+;base64,[A-Za-z0-9+\/=]+/);
-          if (b64) { img.src = b64[0]; }
+          const img  = document.createElement('img');
+          const b64  = token.match(/data:image\/[^;]+;base64,[A-Za-z0-9+\/=]+/);
+          if (b64) img.src = b64[0];
           img.style.cssText = 'max-width:100%;border-radius:8px;border:1px solid var(--border)';
           img.alt = 'Chart';
           wrap.appendChild(img);
@@ -596,123 +601,89 @@ async function sse(url, payload) {
           continue;
         }
 
-        // STATE: THINKING ───────────────────────────────────────────────────
+        // ── THINKING state ────────────────────────────────────────────────
         if (inThinking) {
-          thinkingText += token;
-
-          if (!thinkingText.includes('</thinking>')) {
-            // Strip partial </think... suffix for clean live display
-            const display = thinkingText.replace(/<\/?t(h(i(n(k(i(n(g?)?)?)?)?)?)?)?>?$/i, '');
-            updateThinkingCard(thinkingEl, display);
+          blockBuf += token;
+          if (!blockBuf.includes('</thinking>')) {
+            appendThinking('');   // re-render display (blockBuf already updated)
             continue;
           }
-
-          // Seal this thinking block but KEEP thinkingEl reference
-          // so subsequent <thinking> blocks append to the same card
-          const parts   = thinkingText.split('</thinking>');
-          thinkingText  = parts[0];
-          updateThinkingCard(thinkingEl, thinkingText);
-          sealThinkingCard(thinkingEl);
-          // thinkingEl stays set — reused if another <thinking> block follows
-          inThinking   = false;
+          const [blk, ...tail] = blockBuf.split('</thinking>');
+          blockBuf = blk;
+          sealThinkingBlock();
           lastAnswerBuf = '';
-
-          handleAfterThinking(parts.slice(1).join('</thinking>'));
+          handleAfterThinking(tail.join('</thinking>'));
           continue;
         }
 
-        // Discard tokens during tool execution — checked AFTER inThinking so that
-        // </thinking> close tag is found even when split across tool call boundaries.
+        // Discard tokens during tool execution (AFTER inThinking check)
         if (toolActive) { lastAnswerBuf += token; continue; }
 
-        // STATE: ANSWER ─────────────────────────────────────────────────────
+        // ── ANSWER state ──────────────────────────────────────────────────
         if (started) {
           content += token;
           streamToken(agentEl, content);
           continue;
         }
 
-        // STATE: PREBUF ─────────────────────────────────────────────────────
-        // Trim initial Thinking… spinner on first real token
-        if (toolEls.length === 1 && toolEls[0].classList.contains('thinking')) {
-          toolEls[0].remove(); toolEls = [];
-        }
-
-        // After chart event — accumulate briefly to detect if a <thinking>
-        // evaluation block follows before committing to answer mode.
-        // readyForAnswer=true means chart fired; next tokens may be another
-        // supervisor <thinking> block (evaluation) or the real final answer.
+        // ── PREBUF state ──────────────────────────────────────────────────
+        // readyForAnswer: chart fired, waiting for next thinking or answer
         if (readyForAnswer) {
-          thinkingText += token;
-          if (thinkingText.includes('<thinking>')) {
-            // Supervisor is doing another evaluation <thinking> block — route to card
+          prebuf += token;
+          if (prebuf.includes('<thinking>')) {
             readyForAnswer = false;
-            inThinking   = true;
-            if (!thinkingEl) {
-              thinkingEl = addThinkingCard();
-            } else {
-              reopenThinkingCard(thinkingEl);
-              thinkingText = thinkingText + '\n\n---\n\n';
-            }
-            thinkingText = thinkingText.split('<thinking>').slice(-1)[0];
-            updateThinkingCard(thinkingEl, thinkingText);
-            if (thinkingText.includes('</thinking>')) {
-              const parts  = thinkingText.split('</thinking>');
-              thinkingText = parts[0];
-              updateThinkingCard(thinkingEl, thinkingText);
-              sealThinkingCard(thinkingEl);
-              thinkingEl = null; inThinking = false;
+            const [, ...rest] = prebuf.split('<thinking>');
+            openThinkingBlock();
+            const blockStart = rest.join('<thinking>');
+            prebuf = '';
+            if (blockStart.includes('</thinking>')) {
+              const [blk, ...tail] = blockStart.split('</thinking>');
+              blockBuf = blk;
+              sealThinkingBlock();
               lastAnswerBuf = '';
-              handleAfterThinking(parts.slice(1).join('</thinking>'));
+              handleAfterThinking(tail.join('</thinking>'));
+            } else {
+              appendThinking(blockStart);
             }
-          } else if (!thinkingText.trimStart().startsWith('<') || thinkingText.length > 30) {
-            // Definitely not a <thinking> block — start answer
+          } else if (!prebuf.trimStart().startsWith('<') || prebuf.length > 30) {
             readyForAnswer = false;
-            startAnswer(thinkingText);
-            thinkingText = '';
+            startAnswer(prebuf);
+            prebuf = '';
           }
-          // else keep accumulating (partial '<thi...' tag — wait for more)
           continue;
         }
 
-        thinkingText += token;
+        prebuf += token;
 
-        // Check for <thinking> open tag (may span multiple chunks)
-        if (thinkingText.includes('<thinking>')) {
-          discarding   = false;
-          inThinking   = true;
-          if (!thinkingEl) thinkingEl = addThinkingCard();
-          thinkingText = thinkingText.split('<thinking>').slice(1).join('<thinking>');
-          updateThinkingCard(thinkingEl, thinkingText);
-
-          // Edge case: </thinking> already in same buffer chunk
-          if (thinkingText.includes('</thinking>')) {
-            const parts  = thinkingText.split('</thinking>');
-            thinkingText = parts[0];
-            updateThinkingCard(thinkingEl, thinkingText);
-            sealThinkingCard(thinkingEl);
-            thinkingEl = null; inThinking = false;
-            toolEls.filter(el => !el.classList.contains('done')).forEach(el => markDone(el, 'Done'));
-            toolEls = [];
+        // Detect <thinking> open tag
+        if (prebuf.includes('<thinking>')) {
+          discarding = false;
+          const [, ...rest] = prebuf.split('<thinking>');
+          openThinkingBlock();
+          const blockStart = rest.join('<thinking>');
+          prebuf = '';
+          if (blockStart.includes('</thinking>')) {
+            const [blk, ...tail] = blockStart.split('</thinking>');
+            blockBuf = blk;
+            sealThinkingBlock();
             lastAnswerBuf = '';
-            handleAfterThinking(parts.slice(1).join('</thinking>'));
+            handleAfterThinking(tail.join('</thinking>'));
+          } else {
+            appendThinking(blockStart);
           }
           continue;
         }
 
         if (discarding) {
-          // Keep last 12 chars for partial <thinking> detection
-          if (thinkingText.length > 12) thinkingText = thinkingText.slice(-12);
-          // Also keep full content in lastAnswerBuf (fallback for done-flush)
+          prebuf = prebuf.slice(-12);
           lastAnswerBuf += token;
           continue;
         }
 
-        // Not discarding, no <thinking> — plain answer accumulating
-        // (resume flow, short direct responses)
-        if (thinkingText.length > 500) {
-          startAnswer(thinkingText);
-          thinkingText = '';
+        // Plain answer accumulating (resume flow, short direct responses)
+        if (prebuf.length > 500) {
+          startAnswer(prebuf);
+          prebuf = '';
         }
       }
     }
@@ -721,13 +692,14 @@ async function sse(url, payload) {
       const cleaned = clean(content);
       if (!cleaned) addErr('Response could not be displayed — try + New for a fresh session.');
       else finalize(agentEl, cleaned, latency);
-    } else if (!started && !interrupted) addErr('No response received.');
+    } else if (!started && !interrupted) {
+      addErr('No response received.');
+    }
 
   } catch (e) {
     addErr('Connection error: ' + e.message);
   } finally {
-    toolEls.forEach(el => el.remove());
-    toolEls = [];
+    removeStatus();
     streaming = false;
     setDisabled(false);
     scrollEnd();
