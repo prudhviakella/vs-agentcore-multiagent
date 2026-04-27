@@ -90,7 +90,7 @@ async def build_supervisor_agent(
     )
 
     agent = create_agent(
-        model          = "gpt-4o",
+        model          = "gpt-5.5",
         tools          = tools,
         system_prompt  = system_prompt,
         middleware     = middleware,

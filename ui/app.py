@@ -48,7 +48,7 @@ async def resume(request: Request):
 
 async def _proxy_sse(url: str, payload: dict):
     async def generate():
-        async with httpx.AsyncClient(timeout=180) as client:
+        async with httpx.AsyncClient(timeout=300) as client:
             async with client.stream("POST", url, headers=HEADERS, json=payload) as resp:
                 async for line in resp.aiter_lines():
                     if line:
@@ -390,6 +390,7 @@ async function sse(url, payload) {
   let thinkingText   = '';   // thinking card buffer OR plain-answer pre-buffer
   let thinkingEl     = null;
   let discarding     = false;
+  let toolActive     = false;  // true while between tool_start and tool_end — discard tokens
   let readyForAnswer = false; // set by chart event
   let lastAnswerBuf  = '';   // tokens since last tool_start, for done-flush fallback
 
@@ -478,14 +479,23 @@ async function sse(url, payload) {
           if (toolEls.length === 1 && toolEls[0].classList.contains('thinking')) {
             toolEls[0].remove(); toolEls = [];
           }
-          toolEls.push(addToolStep(toolLabel(ev.name), false));
-          lastAnswerBuf = '';   // reset: this sub-agent's tokens come next
+          toolEls.push(addToolStep(toolLabel(ev.name), true));
+          toolActive = true;
+          // Tear down any answer bubble opened from pre-tool tokens
+          if (started && agentEl) {
+            const row = agentEl.closest('.row');
+            if (row) row.remove();
+            agentEl = null; started = false; content = '';
+          }
+          lastAnswerBuf = '';
           continue;
         }
 
         if (t === 'tool_end') {
           const active = toolEls.filter(el => !el.classList.contains('done'));
           if (active.length > 0) markDone(active[active.length-1], toolLabel(ev.name));
+          toolActive = false;
+          lastAnswerBuf = '';
           continue;
         }
 
@@ -601,6 +611,10 @@ async function sse(url, payload) {
           continue;
         }
 
+        // Discard tokens during tool execution — checked AFTER inThinking so that
+        // </thinking> close tag is found even when split across tool call boundaries.
+        if (toolActive) { lastAnswerBuf += token; continue; }
+
         // STATE: ANSWER ─────────────────────────────────────────────────────
         if (started) {
           content += token;
@@ -614,10 +628,35 @@ async function sse(url, payload) {
           toolEls[0].remove(); toolEls = [];
         }
 
-        // After chart event — start answer immediately
+        // After chart event — accumulate briefly to detect if a <thinking>
+        // evaluation block follows before committing to answer mode.
+        // readyForAnswer=true means chart fired; next tokens may be another
+        // supervisor <thinking> block (evaluation) or the real final answer.
         if (readyForAnswer) {
-          readyForAnswer = false;
-          startAnswer(token);
+          thinkingText += token;
+          if (thinkingText.includes('<thinking>')) {
+            // Supervisor is doing another evaluation <thinking> block — route to card
+            readyForAnswer = false;
+            inThinking   = true;
+            thinkingEl   = addThinkingCard();
+            thinkingText = thinkingText.split('<thinking>').slice(1).join('<thinking>');
+            updateThinkingCard(thinkingEl, thinkingText);
+            if (thinkingText.includes('</thinking>')) {
+              const parts  = thinkingText.split('</thinking>');
+              thinkingText = parts[0];
+              updateThinkingCard(thinkingEl, thinkingText);
+              sealThinkingCard(thinkingEl);
+              thinkingEl = null; inThinking = false;
+              lastAnswerBuf = '';
+              handleAfterThinking(parts.slice(1).join('</thinking>'));
+            }
+          } else if (!thinkingText.trimStart().startsWith('<') || thinkingText.length > 30) {
+            // Definitely not a <thinking> block — start answer
+            readyForAnswer = false;
+            startAnswer(thinkingText);
+            thinkingText = '';
+          }
+          // else keep accumulating (partial '<thi...' tag — wait for more)
           continue;
         }
 
@@ -907,26 +946,35 @@ function addChart(config) {
   wrap.innerHTML = '<canvas id="' + id + '"></canvas>';
   m.appendChild(wrap);
   scrollEnd();
-  // Apply theme colors to match the UI
-  if (config.options) {
-    config.options.plugins = config.options.plugins || {};
-    config.options.plugins.legend = config.options.plugins.legend || {};
-    config.options.plugins.legend.labels = { color: '#cddff0', font: { family: 'AppleGothic, sans-serif' } };
-    if (config.options.plugins.title) config.options.plugins.title.color = '#cddff0';
-    config.options.scales = config.options.scales || {};
-    ['x','y'].forEach(ax => {
-      config.options.scales[ax] = config.options.scales[ax] || {};
-      config.options.scales[ax].ticks = {
-        color: '#6b8fae',
-        maxRotation: ax === 'x' ? 45 : 0,
-        minRotation: ax === 'x' ? 45 : 0,
-        autoSkip: true,
-        maxTicksLimit: ax === 'x' ? 10 : 8,
-      };
-      config.options.scales[ax].grid = { color: 'rgba(26,46,68,0.8)' };
-    });
+
+  // Chart.js v4 compat: "horizontalBar" was removed — use bar + indexAxis:'y'
+  let chartType = config.type || 'bar';
+  if (chartType === 'horizontalBar') {
+    chartType = 'bar';
+    config.options = config.options || {};
+    config.options.indexAxis = 'y';
   }
-  new Chart(document.getElementById(id), { type: config.type || 'bar', data: config.data, options: config.options || {} });
+
+  // Apply theme colors to match the UI
+  config.options = config.options || {};
+  config.options.plugins = config.options.plugins || {};
+  config.options.plugins.legend = config.options.plugins.legend || {};
+  config.options.plugins.legend.labels = { color: '#cddff0', font: { family: 'AppleGothic, sans-serif' } };
+  if (config.options.plugins.title) config.options.plugins.title.color = '#cddff0';
+  config.options.scales = config.options.scales || {};
+  ['x','y'].forEach(ax => {
+    config.options.scales[ax] = config.options.scales[ax] || {};
+    config.options.scales[ax].ticks = {
+      color: '#6b8fae',
+      maxRotation: ax === 'x' ? 45 : 0,
+      minRotation: ax === 'x' ? 45 : 0,
+      autoSkip: true,
+      maxTicksLimit: ax === 'x' ? 10 : 8,
+    };
+    config.options.scales[ax].grid = { color: 'rgba(26,46,68,0.8)' };
+  });
+
+  new Chart(document.getElementById(id), { type: chartType, data: config.data, options: config.options });
 }
 
 // ── Utils ─────────────────────────────────────────────────────────────────
@@ -940,8 +988,18 @@ function toolLabel(n) {
   return n;
 }
 function clean(t) {
+  if (!t) return '';
+  // Strip parallel tool call artifacts GPT-4o leaks as tokens
+  t = t.replace(/multi_tool_use\.parallel\(\{[\s\S]*?\}\)/g, '').trim();
+  t = t.replace(/functions\.[a-z_]+\(\{[\s\S]*?\}\)/g, '').trim();
+  // Strip attachment:// image placeholders from chart agent
+  t = t.replace(/!\[[^\]]*\]\(attachment:\/\/[^)]*\)/g, '').trim();
+  t = t.replace(/\(attachment:\/\/[^)]*\)/g, '').trim();
   // Strip any <thinking>...</thinking> blocks that leaked into final answer
   t = t.replace(/<thinking>[\s\S]*?<\/thinking>/g, '');
+  // Strip any orphaned/partial thinking tags that survived the block stripper
+  t = t.replace(/<\/thinking>/g, '');
+  t = t.replace(/<thinking>/g, '');
   // Strip Chart.js placeholder text in all forms the LLM emits:
   // ![Chart.js visualisation rendered by chart_tool]
   // [Interactive Chart.js visualisation]

@@ -2,31 +2,6 @@
 agents/supervisor/app.py
 =========================
 Supervisor Agent — AgentCore Runtime Entrypoint.
-
-ARCHITECTURE:
-  Cold start (once per container):
-    - OpenAI API key loaded from Secrets Manager
-    - Pinecone, Postgres, SemanticCache initialised
-    - Sub-agent runtime ARNs loaded from SSM
-
-  Per request:
-    - token_queue created (asyncio.Queue)
-    - A2A tools built with session_id + token_queue in closure
-    - Supervisor agent assembled and run via astream_events()
-    - Sub-agent tokens arrive on token_queue and are re-streamed to the client
-
-SAFETY (360° coverage):
-  Input  — Bedrock Guardrail at platform gateway (input_guardrail.py):
-             PROMPT_ATTACK, OffTopicQuery, HATE/VIOLENCE/MISCONDUCT, PII
-  Output — OutputGuardrailMiddleware (Bedrock Guardrail + regex):
-             PersonalMedicalAdvice denied topic, content filters,
-             contextual grounding, check_medical_action_output regex
-
-HITL (4 paths — all preserved):
-  Path A — on_tool_end fires for clarify___ask_user_input
-  Path B — on_chain_end contains __interrupt__ key
-  Path C — Postgres checkpoint has pending interrupt (post-stream state check)
-  Path D — GraphInterrupt exception propagates through astream_events
 """
 
 import asyncio
@@ -55,7 +30,6 @@ try:
     _lg_name = f"/aws/bedrock-agentcore/runtimes/{_rt_id}-DEFAULT"
     _cw = watchtower.CloudWatchLogHandler(
         log_group_name    = _lg_name,
-        log_stream_name   = "runtime-logs",
         boto3_client      = boto3.client("logs", region_name=os.environ.get("AWS_REGION", "us-east-1")),
         create_log_group  = False,
         create_log_stream = True,
@@ -65,7 +39,7 @@ try:
     if not any(isinstance(h, watchtower.CloudWatchLogHandler) for h in root.handlers):
         root.addHandler(_cw)
 except Exception:
-    pass  # local dev — no CloudWatch credentials
+    pass
 
 log = logging.getLogger(__name__)
 
@@ -73,13 +47,11 @@ app = BedrockAgentCoreApp()
 
 _cold_start_objects = None
 
-# Strip episodic memory tag that EpisodicMemoryMiddleware appends to prompts
 _EPISODIC_PATTERN = re.compile(r'\s*\nEPISODIC:\s*(YES|NO)[\d.\s]*$', re.IGNORECASE)
-_TAIL_SIZE = 60  # chars held back to strip episodic tag before flushing
+_TAIL_SIZE = 60
 
 
 def _extract_interrupt_args(iv: dict) -> dict:
-    """Unwrap interrupt value from AgentCore or LangGraph interrupt format."""
     if not iv or not isinstance(iv, dict):
         return {}
     action_requests = iv.get("action_requests", [])
@@ -88,8 +60,23 @@ def _extract_interrupt_args(iv: dict) -> dict:
     return iv
 
 
+def _load_langsmith_from_ssm():
+    """Load LangSmith credentials from Secrets Manager at cold start."""
+    if os.environ.get("LANGSMITH_API_KEY"):
+        return  # already set via env var
+    try:
+        prefix = os.environ.get("SSM_PREFIX", "/vs-agentcore-multiagent/prod")
+        sm     = boto3.client("secretsmanager", region_name="us-east-1")
+        secret = json.loads(sm.get_secret_value(SecretId=f"{prefix}/langsmith")["SecretString"])
+        os.environ["LANGSMITH_API_KEY"] = secret.get("api_key", "")
+        os.environ["LANGSMITH_PROJECT"]  = secret.get("project", "langchain-agent-experiments")
+        os.environ["LANGSMITH_TRACING"]  = secret.get("tracing", "true")
+        log.info("[Supervisor] LangSmith credentials loaded from SSM")
+    except Exception as e:
+        log.warning(f"[Supervisor] LangSmith secret not found — tracing disabled: {e}")
+
+
 async def _ensure_cold_start():
-    """Build heavy objects once at cold start, return cached on warm calls."""
     global _cold_start_objects
     if _cold_start_objects is None:
         log.info("[Supervisor] Cold start — building shared objects")
@@ -101,6 +88,8 @@ async def _ensure_cold_start():
             os.environ["OPENAI_API_KEY"] = secret.get("api_key", "")
             log.info("[Supervisor] OpenAI key loaded")
 
+        _load_langsmith_from_ssm()
+
         _cold_start_objects = await build_supervisor_cold_start()
         log.info("[Supervisor] Cold start complete")
 
@@ -109,19 +98,6 @@ async def _ensure_cold_start():
 
 @app.entrypoint
 async def handler(payload: dict, context: BedrockAgentCoreContext):
-    """
-    Main handler — invoked by Platform API via invoke_agent_runtime().
-
-    Payload keys:
-        message     — user query (empty string on HITL resume)
-        thread_id   — user session identifier
-        domain      — "pharma"
-        resume      — True if this is a HITL resume call
-        user_answer — selected HITL option (resume only)
-
-    Yields SSE event dicts:
-        token, tool_start, tool_end, chart, interrupt, done, error
-    """
     t0          = time.perf_counter()
     message     = payload.get("message",     "")
     thread_id   = payload.get("thread_id",   "") or getattr(context, "session_id", "")
@@ -142,12 +118,10 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
                 "session_id": thread_id,
                 "domain":     domain,
             },
-            "recursion_limit": 100,  # 20 tool calls × ~5 graph steps each
+            "recursion_limit": 100,
         }
         agent_context = {"user_id": thread_id, "session_id": thread_id, "domain": domain}
-        os.environ["LANGSMITH_API_KEY"] = "REMOVED_SEE_SSM"
-        os.environ["LANGSMITH_PROJECT"] = "langchain-agent-experiments"
-        os.environ["LANGSMITH_TRACING"] = "true"
+
         agent = await build_supervisor_agent(
             session_id  = thread_id,
             domain      = domain,
@@ -155,7 +129,6 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
             **cold,
         )
 
-        # ── HITL resume: repair any dangling tool calls left from the interrupt ──
         if is_resume:
             try:
                 from langchain_core.messages import ToolMessage
@@ -207,19 +180,6 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
 
 
 async def _stream_supervisor(agent, input_data, config, agent_context, token_queue):
-    """
-    Stream astream_events() and interleave with token_queue sub-agent events.
-
-    Two event sources run concurrently:
-      astream_events() — Supervisor LLM turns and chain events
-      token_queue      — Sub-agent tokens and events (put there by A2A tools)
-
-    HITL interrupts surface through four paths (A/B/C/D) depending on how
-    LangGraph raises or records the interrupt for clarify___ask_user_input.
-
-    OutputGuardrailMiddleware runs in after_agent (post-stream). If it blocks
-    the answer, the final state check at the end surfaces the fallback message.
-    """
     _tail_buffer    = ""
     hitl_input      = {}
     interrupt_fired = False
@@ -233,7 +193,6 @@ async def _stream_supervisor(agent, input_data, config, agent_context, token_que
         return ""
 
     async def _drain_queue():
-        """Yield all events currently sitting on the token_queue."""
         while True:
             try:
                 yield token_queue.get_nowait()
@@ -247,7 +206,6 @@ async def _stream_supervisor(agent, input_data, config, agent_context, token_que
             version = "v2",
             context = agent_context,
         ):
-            # Drain sub-agent events that arrived while LangGraph was processing
             async for item in _drain_queue():
                 yield item
 
@@ -265,13 +223,11 @@ async def _stream_supervisor(agent, input_data, config, agent_context, token_que
                         yield {"type": "token", "content": safe}
 
             elif kind == "on_tool_start" and "ask_user_input" in name:
-                # Capture HITL args — used by Path A and Path D
                 raw        = data.get("input", {})
                 hitl_input = raw.get("arguments", raw)
                 log.info("[Supervisor] clarify___ask_user_input starting")
 
             elif kind == "on_tool_end" and "ask_user_input" in name:
-                # Path A — tool completed, surface interrupt to UI
                 interrupt_fired = True
                 if _tail_buffer.strip():
                     clean = _EPISODIC_PATTERN.sub("", _tail_buffer).rstrip()
@@ -287,7 +243,6 @@ async def _stream_supervisor(agent, input_data, config, agent_context, token_que
                 return
 
             elif kind == "on_chain_end":
-                # Path B — interrupt embedded in chain output dict
                 output = data.get("output", {})
                 if isinstance(output, dict) and "__interrupt__" in output:
                     interrupts = output["__interrupt__"]
@@ -310,12 +265,11 @@ async def _stream_supervisor(agent, input_data, config, agent_context, token_que
                         return
 
     except HITLInterrupt:
-        raise  # re-raised and caught in handler()
+        raise
 
     except Exception as exc:
         exc_type = type(exc).__name__
         if "Interrupt" in exc_type or "GraphInterrupt" in exc_type:
-            # Path D — interrupt raised as exception by LangGraph
             interrupt_fired = True
             if _tail_buffer.strip():
                 clean = _EPISODIC_PATTERN.sub("", _tail_buffer).rstrip()
@@ -338,17 +292,14 @@ async def _stream_supervisor(agent, input_data, config, agent_context, token_que
             yield {"type": "error", "message": str(exc)}
         return
 
-    # ── Flush tail buffer ─────────────────────────────────────────────────
     if _tail_buffer:
         clean = _EPISODIC_PATTERN.sub("", _tail_buffer).rstrip()
         if clean:
             yield {"type": "token", "content": clean}
 
-    # ── Drain any remaining sub-agent events ──────────────────────────────
     async for item in _drain_queue():
         yield item
 
-    # ── Path C: check Postgres checkpoint for pending interrupt ───────────
     if not interrupt_fired:
         try:
             state = await agent.aget_state(config)
@@ -367,10 +318,6 @@ async def _stream_supervisor(agent, input_data, config, agent_context, token_que
         except Exception as e:
             log.warning(f"[Supervisor] Checkpoint check failed: {e}")
 
-    # ── OutputGuardrailMiddleware post-stream check ───────────────────────
-    # OutputGuardrailMiddleware.after_agent runs after the graph completes.
-    # If Bedrock blocked the answer it replaces the last message with a
-    # fallback. We surface that fallback here so the user sees the reason.
     try:
         final_state = await agent.aget_state(config)
         final_msgs  = final_state.values.get("messages", [])
