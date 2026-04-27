@@ -151,6 +151,10 @@ header{display:flex;align-items:center;justify-content:space-between;padding:0 2
 .bubble a{color:var(--accent);text-decoration:none}
 .bubble hr{border:none;border-top:1px solid var(--border);margin:14px 0}
 .bubble table{border-collapse:collapse;width:100%;margin:10px 0;font-size:13px}
+.bubble table th{background:var(--surface);color:var(--accent);font-weight:600;padding:8px 12px;text-align:left;border-bottom:2px solid var(--border)}
+.bubble table td{padding:7px 12px;border-bottom:1px solid var(--border);color:var(--text)}
+.bubble table tr:last-child td{border-bottom:none}
+.bubble table tr:hover td{background:var(--surface)}
 .bubble th,.bubble td{border:1px solid var(--border);padding:7px 12px;text-align:left}
 .bubble th{background:var(--surface-2);font-weight:500}
 .meta-footer{font-size:11px;color:var(--text-3);margin-top:12px;padding-top:10px;border-top:1px solid var(--border);display:flex;gap:14px;font-weight:300;letter-spacing:.01em}
@@ -557,6 +561,22 @@ async function sse(url, payload) {
         const token = ev.content || ev.result || ev.token || '';
         if (!token) continue;
 
+        // Detect base64 image — chart agent returns PNG as data URI
+        if (token.includes('data:image/') && token.includes('base64,')) {
+          if (!agentEl) { agentEl = addAgentBubble(); started = true; }
+          const wrap = document.createElement('div');
+          wrap.style.cssText = 'margin:12px 0;max-width:100%';
+          const img = document.createElement('img');
+          const b64 = token.match(/data:image\/[^;]+;base64,[A-Za-z0-9+\/=]+/);
+          if (b64) { img.src = b64[0]; }
+          img.style.cssText = 'max-width:100%;border-radius:8px;border:1px solid var(--border)';
+          img.alt = 'Chart';
+          wrap.appendChild(img);
+          agentEl.appendChild(wrap);
+          scrollEnd();
+          continue;
+        }
+
         // STATE: THINKING ───────────────────────────────────────────────────
         if (inThinking) {
           thinkingText += token;
@@ -791,9 +811,36 @@ function chooseHITL(btn, opt) {
   submit(opt);
 }
 
+function mdParseTable(block) {
+  // Parse a markdown table block into HTML
+  const lines = block.trim().split('\n').filter(l => l.trim());
+  if (lines.length < 2) return null;
+  // Check second line is separator (---|---)
+  if (!/^\|?[\s\-|:]+\|?$/.test(lines[1])) return null;
+  const parseRow = (line) =>
+    line.replace(/^\||\|$/g, '').split('|').map(c => c.trim());
+  const headers = parseRow(lines[0]);
+  const rows    = lines.slice(2).map(parseRow);
+  let html = '<table><thead><tr>';
+  headers.forEach(h => { html += '<th>' + h + '</th>'; });
+  html += '</tr></thead><tbody>';
+  rows.forEach(row => {
+    html += '<tr>';
+    row.forEach(cell => { html += '<td>' + cell + '</td>'; });
+    html += '</tr>';
+  });
+  html += '</tbody></table>';
+  return html;
+}
+
 function mdParse(t) {
   if (!t) return '';
   t = clean(t);
+  // Markdown tables — detect blocks with | characters
+  t = t.replace(/((?:\|.+\|\n?){2,})/g, (match) => {
+    const parsed = mdParseTable(match);
+    return parsed || match;
+  });
   // Bold
   t = t.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
   // Inline code
@@ -806,7 +853,7 @@ function mdParse(t) {
   t = t.replace(/(<li>.*<\/li>\n?)+/g, m => m.startsWith('<ol>') ? m : '<ul>' + m + '</ul>');
   // Line breaks → paragraphs
   t = t.split(/\n\n+/).map(p => p.trim()).filter(Boolean).map(p => {
-    if (p.startsWith('<ol>') || p.startsWith('<ul>') || p.startsWith('<li')) return p;
+    if (p.startsWith('<ol>') || p.startsWith('<ul>') || p.startsWith('<li') || p.startsWith('<table')) return p;
     return '<p>' + p.replace(/\n/g, '<br>') + '</p>';
   }).join('');
   return t;
@@ -901,8 +948,6 @@ function clean(t) {
   // ![Efficacy Comparison...](rendered-chart)
   t = t.replace(/!?\[(?:Interactive )?Chart\.js[^\]]*\](?:\([^)]*\))?/gi, '');
   t = t.replace(/!?\[[^\]]*chart[^\]]*\](?:\([^)]*\))?/gi, '');
-  t = t.replace(/!?\[[^\]]*[Cc]hasualization[^\]]*\]\(attachment:[^)]*\)/gi, '');
-  t = t.replace(/\(attachment:\/\/[^)]*\)/gi, '');
   t = t.replace(/\n?EPISODIC:\s*(YES|NO)[\d.\s]*/gi, '');
   t = t.replace(/\n?This information is for research purposes only and does not constitute medical advice\.?\s*/gi, '');
   t = t.replace(/\n?\[Reason logged for review:.*?\]\s*/gis, '');
@@ -918,6 +963,10 @@ function clean(t) {
     if (realContent) t = parts.slice(parts.indexOf(realContent)).join('\n\n');
     else return '';
   }
+  // Strip base64 image data — chart agent returns PNG as data URI token
+  t = t.replace(/data:image\/[^;]+;base64,[A-Za-z0-9+\/=]{20,}/g, '');
+  t = t.replace(/!?\[.*?\]\(data:image[^)]*\)/g, '');
+
   // Remove duplicate paragraphs (sub-agent response echoed in supervisor summary)
   const paras = t.split(/\n\n+/);
   const seen = new Set();

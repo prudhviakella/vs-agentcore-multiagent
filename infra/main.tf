@@ -229,6 +229,7 @@ resource "aws_lb" "main" {
   name               = "${local.prefix}-alb"
   internal           = false
   load_balancer_type = "application"
+  idle_timeout       = 300
   security_groups    = [aws_security_group.ecs.id]
   subnets            = aws_subnet.public[*].id
 }

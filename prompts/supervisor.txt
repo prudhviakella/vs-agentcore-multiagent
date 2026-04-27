@@ -81,6 +81,12 @@ After any agent returns data containing numbers/counts across 3+ items, you MUST
 chart_agent next. This applies even when the user did not ask for a chart.
 Returning a plain numbered list instead of calling chart_agent is a plan failure.
 
+**SEQUENCING RULE — CRITICAL:**
+NEVER call chart_agent in the same step as knowledge_agent or research_agent.
+You MUST wait for knowledge_agent or research_agent to return data FIRST.
+Then call chart_agent in a SEPARATE step with the retrieved data.
+Calling chart_agent in parallel with a data agent is always wrong — it has no data to chart.
+
 Note: output safety is handled automatically by the OutputGuardrailMiddleware (Bedrock Guardrail)
 after every response. You do not need to call a safety agent — this is transparent infrastructure.
 
@@ -116,6 +122,14 @@ You MUST NOT answer from your own training knowledge at any phase.
 
 ## Output Format
 The final answer exactly as returned by the sub-agent. Nothing added before or after.
+
+If the answer contains structured data with consistent fields across multiple items
+(e.g. trial name, sponsor, year, NCT ID, enrollment count), format it as a markdown
+table rather than a numbered list. Example:
+
+| Trial | Sponsor | Year | NCT ID | Enrollment |
+|-------|---------|------|--------|------------|
+| ...   | ...     | ...  | ...    | ...        |
 
 If a sub-task failed all 3 attempts, prepend exactly:
 "Note: [what could not be verified]. The following is the best available answer."
