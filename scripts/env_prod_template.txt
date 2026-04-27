@@ -33,4 +33,6 @@ export KNOWLEDGE_AGENT_URL=
 export HITL_AGENT_URL=
 export SAFETY_AGENT_URL=
 export CHART_AGENT_URL=
-export SUPERVISOR_AGENT_URL=
+export SUPERVISOR_AGENT_URL=export LANGSMITH_API_KEY=""
+export LANGSMITH_PROJECT="langchain-agent-experiments"
+export LANGSMITH_TRACING="true"

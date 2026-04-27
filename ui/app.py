@@ -161,7 +161,7 @@ header{display:flex;align-items:center;justify-content:space-between;padding:0 2
 
 /* tool step */
 .tool-step{display:flex;align-items:center;gap:10px;padding:9px 14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r);font-size:12.5px;font-weight:300;color:var(--text-2);max-width:320px;margin-left:42px;animation:fadeUp .18s ease;letter-spacing:.01em}
-.tool-step.done{color:var(--green);border-color:rgba(0,229,160,.2)}
+.tool-step.done{color:var(--text-2);border-color:var(--border)}
 .tool-step.thinking{border-style:dashed;border-color:var(--border-2)}
 .spin{width:13px;height:13px;border:1.5px solid var(--border-2);border-top-color:var(--accent);border-radius:50%;animation:spin .65s linear infinite;flex-shrink:0}
 .spin.pulse{border-color:transparent;border-top-color:var(--text-3);animation:spin 1.2s linear infinite}
@@ -224,8 +224,8 @@ textarea::placeholder{color:var(--text-3)}
 .agent-bubble strong{font-weight:500;color:var(--text)}
 .agent-bubble code{font-family:'Menlo',monospace;font-size:12.5px;background:var(--surface);padding:2px 5px;border-radius:4px;border:1px solid var(--border)}
 /* ── tool steps ── */
-.done-tick{color:var(--accent)}
-.tool-step.done .num{color:var(--accent)}
+.done-tick{color:var(--text-2)}
+.tool-step.done .num{color:var(--text-2)}
 /* ── meta footer ── */
 .meta{display:flex;gap:12px;font-size:11px;color:var(--text-3,#4a6a8a);margin-top:10px;padding-top:8px;border-top:1px solid var(--border)}
 </style>
@@ -439,11 +439,20 @@ async function sse(url, payload) {
       enterDiscard(afterTrimmed);
     } else if (afterTrimmed.startsWith('<thinking>')) {
       inThinking   = true;
-      thinkingEl   = addThinkingCard();
-      thinkingText = afterTrimmed.slice('<thinking>'.length);
+      if (!thinkingEl) {
+        thinkingEl = addThinkingCard();
+      } else {
+        // Reopen existing card — append separator
+        reopenThinkingCard(thinkingEl);
+        thinkingText = thinkingText + '\n\n---\n\n';
+      }
+      thinkingText += afterTrimmed.slice('<thinking>'.length);
       updateThinkingCard(thinkingEl, thinkingText);
     } else if (afterTrimmed.startsWith('<')) {
       enterDiscard(afterTrimmed);          // partial tag e.g. '<t'
+    } else if (/^(Case [A-D]|Where |Target:|Plan:|Q[123]\.|Note:|Step )/.test(afterTrimmed)) {
+      // Thinking content leaked after </thinking> split — discard it
+      enterDiscard(afterTrimmed);
     } else {
       startAnswer(afterTrimmed);           // real answer text
     }
@@ -598,12 +607,13 @@ async function sse(url, payload) {
             continue;
           }
 
-          // Seal this thinking block
+          // Seal this thinking block but KEEP thinkingEl reference
+          // so subsequent <thinking> blocks append to the same card
           const parts   = thinkingText.split('</thinking>');
           thinkingText  = parts[0];
           updateThinkingCard(thinkingEl, thinkingText);
           sealThinkingCard(thinkingEl);
-          thinkingEl   = null;
+          // thinkingEl stays set — reused if another <thinking> block follows
           inThinking   = false;
           lastAnswerBuf = '';
 
@@ -638,8 +648,13 @@ async function sse(url, payload) {
             // Supervisor is doing another evaluation <thinking> block — route to card
             readyForAnswer = false;
             inThinking   = true;
-            thinkingEl   = addThinkingCard();
-            thinkingText = thinkingText.split('<thinking>').slice(1).join('<thinking>');
+            if (!thinkingEl) {
+              thinkingEl = addThinkingCard();
+            } else {
+              reopenThinkingCard(thinkingEl);
+              thinkingText = thinkingText + '\n\n---\n\n';
+            }
+            thinkingText = thinkingText.split('<thinking>').slice(-1)[0];
             updateThinkingCard(thinkingEl, thinkingText);
             if (thinkingText.includes('</thinking>')) {
               const parts  = thinkingText.split('</thinking>');
@@ -666,7 +681,7 @@ async function sse(url, payload) {
         if (thinkingText.includes('<thinking>')) {
           discarding   = false;
           inThinking   = true;
-          thinkingEl   = addThinkingCard();
+          if (!thinkingEl) thinkingEl = addThinkingCard();
           thinkingText = thinkingText.split('<thinking>').slice(1).join('<thinking>');
           updateThinkingCard(thinkingEl, thinkingText);
 
@@ -801,6 +816,12 @@ function addToolStep(label, active) {
 
 function markDone(el, label) {
   if (!el) return;
+  // Hide generic analysis steps — only keep chart/clarification visible
+  const keep = label === 'Chart ready' || label === 'Clarification needed';
+  if (!keep) {
+    el.remove();
+    return;
+  }
   el.classList.add('done');
   el.classList.remove('thinking');
   el.innerHTML = '<span class="num done-tick">✓</span><span>' + esc(label) + '</span>';
@@ -924,9 +945,21 @@ function sealThinkingCard(wrap) {
   if (btn) {
     btn.classList.remove('streaming');
     const dot = btn.querySelector('.live-dot');
-    if (dot) dot.remove();
+    if (dot) dot.style.display = 'none';  // hide dot but keep element for re-opening
     const label = btn.querySelector('span:nth-child(2)');
     if (label) label.textContent = 'Reasoning (' + wrap.querySelector('.thinking-body').textContent.length + ' chars)';
+  }
+}
+
+function reopenThinkingCard(wrap) {
+  if (!wrap) return;
+  const btn = wrap.querySelector('.thinking-toggle');
+  if (btn) {
+    btn.classList.add('streaming');
+    const dot = btn.querySelector('.live-dot');
+    if (dot) dot.style.display = '';
+    const label = btn.querySelector('span:nth-child(2)');
+    if (label) label.textContent = 'Reasoning';
   }
 }
 function toggleThinking(btn) {
@@ -961,31 +994,31 @@ function addChart(config) {
   config.options.plugins.legend = config.options.plugins.legend || {};
   config.options.plugins.legend.labels = { color: '#cddff0', font: { family: 'AppleGothic, sans-serif' } };
   if (config.options.plugins.title) config.options.plugins.title.color = '#cddff0';
-  config.options.scales = config.options.scales || {};
-  ['x','y'].forEach(ax => {
-    config.options.scales[ax] = config.options.scales[ax] || {};
-    config.options.scales[ax].ticks = {
-      color: '#6b8fae',
-      maxRotation: ax === 'x' ? 45 : 0,
-      minRotation: ax === 'x' ? 45 : 0,
-      autoSkip: true,
-      maxTicksLimit: ax === 'x' ? 10 : 8,
-    };
-    config.options.scales[ax].grid = { color: 'rgba(26,46,68,0.8)' };
-  });
+  // Pie/doughnut charts don't use scales — applying scales breaks them
+  if (!['pie', 'doughnut'].includes(chartType)) {
+    config.options.scales = config.options.scales || {};
+    ['x','y'].forEach(ax => {
+      config.options.scales[ax] = config.options.scales[ax] || {};
+      config.options.scales[ax].ticks = {
+        color: '#6b8fae',
+        maxRotation: ax === 'x' ? 45 : 0,
+        minRotation: ax === 'x' ? 45 : 0,
+        autoSkip: true,
+        maxTicksLimit: ax === 'x' ? 10 : 8,
+      };
+      config.options.scales[ax].grid = { color: 'rgba(26,46,68,0.8)' };
+    });
+  }
 
   new Chart(document.getElementById(id), { type: chartType, data: config.data, options: config.options });
 }
 
 // ── Utils ─────────────────────────────────────────────────────────────────
 function toolLabel(n) {
-  if (!n) return 'Processing…';
-  if (n.includes('search'))     return 'Searching knowledge base…';
-  if (n.includes('graph'))      return 'Querying knowledge graph…';
-  if (n.includes('summariser')) return 'Synthesising results…';
-  if (n.includes('chart'))      return 'Generating chart…';
-  if (n.includes('ask_user'))   return 'Preparing clarification…';
-  return n;
+  if (!n) return 'Analysing…';
+  if (n.includes('chart'))      return 'Chart ready';
+  if (n.includes('ask_user'))   return 'Clarification needed';
+  return 'Analysing…';
 }
 function clean(t) {
   if (!t) return '';

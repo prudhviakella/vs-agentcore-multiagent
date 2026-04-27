@@ -232,12 +232,21 @@ async def _invoke_sub_agent_prod(
 
     runtime_arn = arns[agent_name]
     session_id  = payload.get("session_id", f"{agent_name}-session")
-    loop        = asyncio.get_event_loop()
+    loop        = asyncio.get_running_loop()  # get_event_loop() deprecated in 3.10+
     chunk_queue = asyncio.Queue()
 
     def _stream_in_thread():
         try:
-            client   = boto3.client("bedrock-agentcore", region_name=REGION)
+            from botocore.config import Config as _BotocoreConfig
+            client   = boto3.client(
+                "bedrock-agentcore",
+                region_name = REGION,
+                config      = _BotocoreConfig(
+                    read_timeout    = 300,
+                    connect_timeout = 10,
+                    retries         = {"max_attempts": 0},
+                ),
+            )
             response = client.invoke_agent_runtime(
                 agentRuntimeArn  = runtime_arn,
                 runtimeSessionId = session_id,
@@ -313,14 +322,14 @@ def build_a2a_tools(
                 agent_session_id = f"{session_id}__{agent_name}"
                 effective_queue  = asyncio.Queue() if agent_name == "safety" else token_queue
 
-                t0 = asyncio.get_event_loop().time()
+                t0 = asyncio.get_running_loop().time()
                 answer, span_data = await _invoke_sub_agent(
                     agent_name  = agent_name,
                     payload     = {"message": query, "session_id": agent_session_id, "domain": domain},
                     token_queue = effective_queue,
                     port        = agent_port,
                 )
-                elapsed_ms = round((asyncio.get_event_loop().time() - t0) * 1000, 2)
+                elapsed_ms = round((asyncio.get_running_loop().time() - t0) * 1000, 2)
 
                 if agent_name == "safety":
                     verdict       = answer.strip()

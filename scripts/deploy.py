@@ -430,7 +430,8 @@ def step_secrets():
     header("Step 1: Secrets + SSM")
 
     required = ["OPENAI_API_KEY", "PINECONE_API_KEY", "NEO4J_URI",
-                "NEO4J_USER", "NEO4J_PASSWORD", "PLATFORM_API_KEY"]
+                "NEO4J_USER", "NEO4J_PASSWORD", "PLATFORM_API_KEY",
+                "LANGSMITH_API_KEY"]
     missing  = [k for k in required if not os.environ.get(k)]
     if missing:
         fail(f"Missing env vars: {missing}")
@@ -462,6 +463,14 @@ def step_secrets():
                                                    "user": os.environ["NEO4J_USER"],
                                                    "password": os.environ["NEO4J_PASSWORD"]})
     put_secret(f"{SSM_PREFIX}/platform_api_key", {"api_key": os.environ["PLATFORM_API_KEY"]})
+
+    # LangSmith observability
+    put_secret(f"{SSM_PREFIX}/langsmith", {
+        "api_key": os.environ["LANGSMITH_API_KEY"],
+        "project": os.environ.get("LANGSMITH_PROJECT", "langchain-agent-experiments"),
+        "tracing": os.environ.get("LANGSMITH_TRACING", "true"),
+    })
+    ok("LangSmith secret written")
 
     # Write platform_api_key to BOTH SSM paths:
     # 1. New prefix — used by agents and platform middleware
@@ -1014,8 +1023,44 @@ def step_platform():
     else:
         run(["terraform", "apply", "-auto-approve", "-input=false"] + tf_vars,
             cwd=infra_dir, extra_env=tf_env)
+
+        # ── Post-terraform: force ECS services to use the latest task definition ──
+        # Terraform creates a new task definition revision but the ECS service
+        # may still be running an old revision. Force-update both services so
+        # students always get the correct AGENT_API_URL and image on first deploy.
+        ecs = c("ecs")
+        for svc, td in [("platform", "platform"), ("ui", "ui")]:
+            svc_name = f"{PREFIX}-{svc}"
+            td_name  = f"{PREFIX}-{td}"
+            try:
+                # Get latest task definition revision
+                td_desc = c("ecs").describe_task_definition(taskDefinition=td_name)
+                latest_td_arn = td_desc["taskDefinition"]["taskDefinitionArn"]
+                ecs.update_service(
+                    cluster        = f"{PREFIX}-cluster",
+                    service        = svc_name,
+                    taskDefinition = latest_td_arn,
+                    forceNewDeployment = True,
+                )
+                ok(f"{svc_name} → {latest_td_arn.split('/')[-1]}")
+            except Exception as e:
+                warn(f"{svc_name} update failed: {e}")
+
+        # ── Restore ALB idle timeout (terraform resets it to 60s) ────────────────
+        try:
+            alb_arn = c("elbv2").describe_load_balancers(
+                Names=[f"{PREFIX}-alb"]
+            )["LoadBalancers"][0]["LoadBalancerArn"]
+            c("elbv2").modify_load_balancer_attributes(
+                LoadBalancerArn = alb_arn,
+                Attributes      = [{"Key": "idle_timeout.timeout_seconds", "Value": "300"}],
+            )
+            ok("ALB idle timeout = 300s")
+        except Exception as e:
+            warn(f"ALB timeout update failed: {e}")
+
         print()
-        print("  Platform done \u2705")
+        ok("Platform done")
         print("  \u26a0\ufe0f  MANUAL STEP: set POSTGRES_URL in .env then re-run: python deploy.py secrets")
 
 

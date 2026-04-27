@@ -79,11 +79,9 @@ AGENT          = "clinical-trial"
 rate_limiter   = RateLimiter(requests_per_minute=60)
 
 
-@lru_cache(maxsize=1)
 def _get_agent_runtime_arn() -> str:
-    """Fetch supervisor runtime ARN from SSM — cached after first call."""
+    """Fetch supervisor runtime ARN from SSM on every call — no cache."""
     ssm = boto3.client("ssm", region_name=REGION)
-    # Try multiple SSM paths for backwards compatibility
     for key in [
         f"{SSM_PREFIX}/agents/supervisor/runtime_arn",
         f"{SSM_PREFIX}/agent_runtime_arn",
@@ -91,7 +89,7 @@ def _get_agent_runtime_arn() -> str:
     ]:
         try:
             val = ssm.get_parameter(Name=key)["Parameter"]["Value"]
-            log.info(f"[PLATFORM] Supervisor runtime ARN from {key}: {val}")
+            log.info(f"[PLATFORM] Supervisor runtime ARN: {val}")
             return val
         except Exception:
             continue
@@ -141,12 +139,23 @@ async def _stream_agentcore(payload: dict, request_id: str):
     """
     t0    = time.perf_counter()
     queue = asyncio.Queue()
-    loop  = asyncio.get_event_loop()
+    loop  = asyncio.get_running_loop()  # get_event_loop() is deprecated in 3.10+
 
     def _stream_to_queue():
         try:
             agent_arn = _get_agent_runtime_arn()
-            client    = boto3.client("bedrock-agentcore", region_name=REGION)
+            # Set read_timeout=300 — default 60s causes ReadTimeoutError
+            # for complex queries that take 90-120s to complete
+            from botocore.config import Config
+            client    = boto3.client(
+                "bedrock-agentcore",
+                region_name = REGION,
+                config      = Config(
+                    read_timeout    = 300,   # 5 min — matches ALB idle timeout
+                    connect_timeout = 10,
+                    retries         = {"max_attempts": 0},  # no retries on streaming
+                ),
+            )
 
             log.info(
                 f"[PLATFORM] → Supervisor (AgentCore)"
@@ -195,7 +204,13 @@ async def _stream_agentcore(payload: dict, request_id: str):
 
     try:
         while True:
-            chunk = await queue.get()
+            try:
+                # Wait max 10s for next chunk — send keepalive comment if nothing arrives
+                # This prevents ALB from closing idle SSE connections during long tool calls
+                chunk = await asyncio.wait_for(queue.get(), timeout=10.0)
+            except asyncio.TimeoutError:
+                yield ": keepalive\n\n"  # SSE comment — ignored by client, resets ALB idle timer
+                continue
             if chunk is None:
                 break
             text = chunk.decode("utf-8", errors="replace") if isinstance(chunk, bytes) else chunk
