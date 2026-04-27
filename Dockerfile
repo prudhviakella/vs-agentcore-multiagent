@@ -1,26 +1,25 @@
 FROM python:3.11-slim
+
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends curl \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc libpq-dev curl && rm -rf /var/lib/apt/lists/*
 
-# AGENT_NAME passed via --build-arg (e.g. "research", "supervisor")
+# AGENT_NAME passed via --build-arg (e.g. "supervisor", "research")
 ARG AGENT_NAME
 ENV AGENT_NAME=${AGENT_NAME}
+ENV SSM_PREFIX=/vs-agentcore-multiagent/prod
+ENV AGENT_ENV=prod
 
-# Each agent has its own requirements.txt
 COPY agents/${AGENT_NAME}/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the specific agent module
 COPY agents/${AGENT_NAME}/ ./agents/${AGENT_NAME}/
-
-# Copy shared core (middleware, tools, AWS utils)
 COPY core/ ./core/
 
-EXPOSE 8000
+EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD curl -f http://localhost:8080/ping || exit 1
 
 CMD python -m agents.${AGENT_NAME}.app

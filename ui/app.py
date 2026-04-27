@@ -19,7 +19,9 @@ from fastapi.responses import HTMLResponse, StreamingResponse, Response
 log = logging.getLogger(__name__)
 
 API_URL = os.environ.get("AGENT_API_URL", "http://localhost:8000")
-API_KEY = os.environ.get("PLATFORM_API_KEY", "local-dev-key")
+API_KEY = (os.environ.get("AGENT_API_KEY") or
+          os.environ.get("PLATFORM_API_KEY") or
+          "local-dev-key")
 DOMAIN  = os.environ.get("AGENT_DOMAIN",  "pharma")
 AGENT   = "clinical-trial"
 
@@ -899,6 +901,8 @@ function clean(t) {
   // ![Efficacy Comparison...](rendered-chart)
   t = t.replace(/!?\[(?:Interactive )?Chart\.js[^\]]*\](?:\([^)]*\))?/gi, '');
   t = t.replace(/!?\[[^\]]*chart[^\]]*\](?:\([^)]*\))?/gi, '');
+  t = t.replace(/!?\[[^\]]*[Cc]hasualization[^\]]*\]\(attachment:[^)]*\)/gi, '');
+  t = t.replace(/\(attachment:\/\/[^)]*\)/gi, '');
   t = t.replace(/\n?EPISODIC:\s*(YES|NO)[\d.\s]*/gi, '');
   t = t.replace(/\n?This information is for research purposes only and does not constitute medical advice\.?\s*/gi, '');
   t = t.replace(/\n?\[Reason logged for review:.*?\]\s*/gis, '');

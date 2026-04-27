@@ -6,34 +6,41 @@ imports. agent.py, cache.py, and pinecone_store.py stay cloud-agnostic —
 they receive initialised clients, not raw credentials.
 
 All credentials are read from SSM Parameter Store or Secrets Manager.
-ENV is hardcoded to "dev" — no APP_ENV or local-mode branching.
-Students run against real AWS services from day one.
 
-SSM parameter paths:
-  /clinical-agent/dev/pinecone/api_key
-  /clinical-agent/dev/pinecone/index_name
-  /clinical-agent/dev/dynamodb/trace_table_name
-  /clinical-agent/dev/platform/api_key
-  /clinical-trial-agent/dev/bedrock/prompt_id
-  /clinical-trial-agent/dev/bedrock/prompt_version
+SSM_PREFIX controls all parameter paths:
+  Default: /vs-agentcore-multiagent/prod
+  Override: set SSM_PREFIX env var
 
-Secrets Manager:
-  clinical-agent/dev/postgres
-    {"host":..., "port":..., "dbname":..., "username":..., "password":...}
+SSM parameter paths (all under SSM_PREFIX):
+  {SSM_PREFIX}/pinecone/clinical_trials_index
+  {SSM_PREFIX}/dynamodb/trace_table_name
+  {SSM_PREFIX}/bedrock/guardrail_id
+  {SSM_PREFIX}/bedrock/guardrail_version
+
+Per-agent prompt paths (under /{agent_name}/prod/):
+  /{app_name}/{ENV}/bedrock/prompt_id
+  /{app_name}/{ENV}/bedrock/prompt_version
+
+Secrets Manager (all under SSM_PREFIX):
+  {SSM_PREFIX}/openai         → {"api_key": ...}
+  {SSM_PREFIX}/pinecone       → {"api_key": ...}
+  {SSM_PREFIX}/neo4j          → {"uri": ..., "user": ..., "password": ...}
+  {SSM_PREFIX}/postgres       → {"host":..., "port":..., "dbname":..., "username":..., "password":...}
+  {SSM_PREFIX}/platform_api_key → {"api_key": ...}
 """
 
 import json
 import logging
+import os
 import time
 from functools import lru_cache
 from typing import Any
 
 log = logging.getLogger(__name__)
 
-# Fixed environment — all SSM paths use /dev/ prefix.
-# Change this one constant to switch environments.
-import os
-ENV = os.environ.get("AGENT_ENV", "dev")
+ENV        = os.environ.get("AGENT_ENV", "prod")
+SSM_PREFIX = os.environ.get("SSM_PREFIX", "/vs-agentcore-multiagent/prod")
+REGION     = os.environ.get("AWS_REGION", "us-east-1")
 
 
 # ── Boto3 clients ──────────────────────────────────────────────────────────────
@@ -41,19 +48,19 @@ ENV = os.environ.get("AGENT_ENV", "dev")
 @lru_cache(maxsize=None)
 def _ssm() -> Any:
     import boto3
-    return boto3.client("ssm", region_name="us-east-1")
+    return boto3.client("ssm", region_name=REGION)
 
 
 @lru_cache(maxsize=None)
 def _secretsmanager() -> Any:
     import boto3
-    return boto3.client("secretsmanager", region_name="us-east-1")
+    return boto3.client("secretsmanager", region_name=REGION)
 
 
 @lru_cache(maxsize=None)
 def _bedrock() -> Any:
     import boto3
-    return boto3.client("bedrock-agent", region_name="us-east-1")
+    return boto3.client("bedrock-agent", region_name=REGION)
 
 
 @lru_cache(maxsize=None)
@@ -81,8 +88,18 @@ def get_secret_json(secret_name: str) -> dict:
 
 def init_pinecone_index() -> Any:
     from pinecone import Pinecone
-    api_key    = get_ssm_parameter(f"/clinical-agent/{ENV}/pinecone/api_key")
-    index_name = get_ssm_parameter(f"/clinical-agent/{ENV}/pinecone/index_name", with_decryption=False)
+    # Read API key from Secrets Manager
+    secret     = get_secret_json(f"{SSM_PREFIX}/pinecone")
+    api_key    = secret["api_key"]
+    # Read index name from SSM — falls back to env var or default
+    index_name = os.environ.get("PINECONE_INDEX_NAME", "clinical-agent")
+    try:
+        index_name = get_ssm_parameter(
+            f"{SSM_PREFIX}/pinecone/clinical_trials_index",
+            with_decryption=False,
+        )
+    except Exception:
+        pass
     log.info(f"[AWS] Pinecone index='{index_name}'  env={ENV}")
     return Pinecone(api_key=api_key).Index(index_name)
 
@@ -91,11 +108,11 @@ def init_pinecone_index() -> Any:
 
 def init_postgres_url() -> str:
     # Check env var first — allows local dev override via --postgres-url flag
-    # without touching Secrets Manager
     env_url = os.environ.get("POSTGRES_URL")
     if env_url:
         return env_url
-    secret = get_secret_json(f"clinical-agent/{ENV}/postgres")
+    # Read from Secrets Manager using SSM_PREFIX
+    secret = get_secret_json(f"{SSM_PREFIX}/postgres")
     from urllib.parse import quote_plus
     return (
         f"postgresql://{secret['username']}:{quote_plus(secret['password'])}"
@@ -106,10 +123,13 @@ def init_postgres_url() -> str:
 # ── DynamoDB ───────────────────────────────────────────────────────────────────
 
 def get_trace_table_name(app_name: str = "clinical-agent") -> str:
-    return get_ssm_parameter(
-        f"/{app_name}/{ENV}/dynamodb/trace_table_name",
-        with_decryption=False,
-    )
+    try:
+        return get_ssm_parameter(
+            f"{SSM_PREFIX}/dynamodb/trace_table_name",
+            with_decryption=False,
+        )
+    except Exception:
+        return "vs-agentcore-ma-traces"
 
 
 def init_trace_table(table_name: str, ttl_days: int = 30, region: str = "us-east-1") -> Any:
@@ -123,16 +143,16 @@ def init_trace_table(table_name: str, ttl_days: int = 30, region: str = "us-east
         if e.response["Error"]["Code"] != "ResourceNotFoundException":
             raise
         table = ddb.create_table(
-            TableName=table_name,
-            KeySchema=[{"AttributeName": "run_id", "KeyType": "HASH"}],
-            AttributeDefinitions=[{"AttributeName": "run_id", "AttributeType": "S"}],
-            BillingMode="PAY_PER_REQUEST",
+            TableName             = table_name,
+            KeySchema             = [{"AttributeName": "run_id", "KeyType": "HASH"}],
+            AttributeDefinitions  = [{"AttributeName": "run_id", "AttributeType": "S"}],
+            BillingMode           = "PAY_PER_REQUEST",
         )
         table.wait_until_exists()
         if ttl_days > 0:
             ddb.meta.client.update_time_to_live(
-                TableName=table_name,
-                TimeToLiveSpecification={"Enabled": True, "AttributeName": "expires_at"},
+                TableName                = table_name,
+                TimeToLiveSpecification  = {"Enabled": True, "AttributeName": "expires_at"},
             )
         log.info(f"[AWS] DynamoDB table '{table_name}' created")
     return table
@@ -146,7 +166,7 @@ def put_trace(table: Any, trace: dict, ttl_days: int = 30) -> None:
         if isinstance(v, list):  return [_to_decimal(i) for i in v]
         return v
     try:
-        item = _to_decimal(dict(trace))
+        item           = _to_decimal(dict(trace))
         item["run_id"] = str(trace.get("run_id", "unknown"))
         item["ts"]     = Decimal(str(round(time.time(), 3)))
         if ttl_days > 0:
@@ -164,6 +184,15 @@ def get_trace_item(table_name: str, run_id: str, region: str = "us-east-1") -> d
     except Exception as exc:
         log.error(f"[AWS] DynamoDB get_trace failed: {exc}")
         return None
+
+
+# ── Bedrock Guardrail ──────────────────────────────────────────────────────────
+
+def get_guardrail_config() -> tuple[str, str]:
+    """Returns (guardrail_id, guardrail_version) from SSM."""
+    guardrail_id      = get_ssm_parameter(f"{SSM_PREFIX}/bedrock/guardrail_id",      with_decryption=False)
+    guardrail_version = get_ssm_parameter(f"{SSM_PREFIX}/bedrock/guardrail_version",  with_decryption=False)
+    return guardrail_id, guardrail_version
 
 
 # ── Bedrock Prompt Management ──────────────────────────────────────────────────
@@ -186,12 +215,21 @@ def _fetch_prompt_template(prompt_id: str, prompt_version: str) -> str:
     return template
 
 
-def get_bedrock_prompt(app_name: str = "clinical-trial-agent") -> str:
+def get_bedrock_prompt(app_name: str = "supervisor-agent") -> str:
     """
     Read prompt_id + prompt_version from SSM then fetch the template from Bedrock.
     SSM is read on every call so a version update takes effect without a restart.
     The template itself is cached by (prompt_id, prompt_version).
+
+    SSM paths tried in order:
+      1. /{app_name}/{ENV}/bedrock/prompt_id  (per-agent path — set by deploy.py prompts)
+      2. {SSM_PREFIX}/bedrock/prompt_id       (shared path — fallback)
     """
-    prompt_id      = get_ssm_parameter(f"/{app_name}/{ENV}/bedrock/prompt_id",      with_decryption=False)
-    prompt_version = get_ssm_parameter(f"/{app_name}/{ENV}/bedrock/prompt_version",  with_decryption=False)
+    try:
+        prompt_id      = get_ssm_parameter(f"/{app_name}/{ENV}/bedrock/prompt_id",      with_decryption=False)
+        prompt_version = get_ssm_parameter(f"/{app_name}/{ENV}/bedrock/prompt_version",  with_decryption=False)
+    except Exception:
+        # Fallback to shared SSM prefix
+        prompt_id      = get_ssm_parameter(f"{SSM_PREFIX}/bedrock/prompt_id",      with_decryption=False)
+        prompt_version = get_ssm_parameter(f"{SSM_PREFIX}/bedrock/prompt_version",  with_decryption=False)
     return _fetch_prompt_template(prompt_id, prompt_version)

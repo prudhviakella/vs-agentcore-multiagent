@@ -324,6 +324,7 @@ def step_prompts():
     bedrock = c("bedrock-agent")
     ssm     = c("ssm")
 
+    ENV    = "prod"
     agents = ["supervisor", "research", "knowledge", "safety", "chart"]
 
     for agent in agents:
@@ -416,6 +417,13 @@ def step_prompts():
 
         ssm.put_parameter(Name=ssm_id_key,  Value=prompt_id,      Type="String", Overwrite=True)
         ssm.put_parameter(Name=ssm_ver_key, Value=prompt_version, Type="String", Overwrite=True)
+
+        # Also write to short path (/{agent}/prod/) — AGENT_NAME env var is set to
+        # "supervisor" not "supervisor-agent", so core/aws.py reads /{agent}/prod/ first
+        short_id_key  = f"/{agent}/{ENV}/bedrock/prompt_id"
+        short_ver_key = f"/{agent}/{ENV}/bedrock/prompt_version"
+        ssm.put_parameter(Name=short_id_key,  Value=prompt_id,      Type="String", Overwrite=True)
+        ssm.put_parameter(Name=short_ver_key, Value=prompt_version, Type="String", Overwrite=True)
         ok(f"[{agent}]  prompt_id={prompt_id}  version={prompt_version}")
 
         try:
@@ -462,6 +470,14 @@ def step_secrets():
                                                    "user": os.environ["NEO4J_USER"],
                                                    "password": os.environ["NEO4J_PASSWORD"]})
     put_secret(f"{SSM_PREFIX}/platform_api_key", {"api_key": os.environ["PLATFORM_API_KEY"]})
+
+    # Write platform_api_key to BOTH SSM paths:
+    # 1. New prefix — used by agents and platform middleware
+    # 2. Old prefix (/vs-agentcore/prod/) — used by Terraform main.tf secrets injection
+    #    for the ECS UI task (AGENT_API_KEY env var). Without this the UI task fails with
+    #    "invalid ssm parameters" and the UI sends no X-API-Key → 401 from platform.
+    put_param(f"{SSM_PREFIX}/platform_api_key",       os.environ["PLATFORM_API_KEY"], secure=True)
+    put_param("/vs-agentcore/prod/platform_api_key",  os.environ["PLATFORM_API_KEY"], secure=True)
 
     postgres_url = os.environ.get("POSTGRES_URL", "")
     if postgres_url and "<rds-endpoint>" not in postgres_url:
@@ -572,8 +588,49 @@ def step_iam():
             {"Sid": "CloudWatchLogs", "Effect": "Allow",
              "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents",
                         "logs:DescribeLogGroups", "logs:DescribeLogStreams"], "Resource": "*"},
+            {"Sid": "XRayTracing", "Effect": "Allow",
+             "Action": ["xray:PutTraceSegments", "xray:PutTelemetryRecords",
+                        "xray:GetSamplingRules", "xray:GetSamplingTargets"], "Resource": "*"},
         ]
     })
+
+    # ── ECS Execution Role — SSM + Secrets access ────────────────────────────
+    # This role is created by Terraform for the ECS tasks (platform + UI).
+    # It needs SSM and SecretsManager permissions to inject secrets at task startup.
+    # Error seen: "not authorized to perform ssm:GetParameters on resource: .../platform_api_key"
+    ecs_exec_role = f"{PREFIX}-ecs-execution"
+    try:
+        iam.get_role(RoleName=ecs_exec_role)
+        put_policy(ecs_exec_role, "SSMSecretsAccess", {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Sid": "SSMParams",
+                    "Effect": "Allow",
+                    "Action": [
+                        "ssm:GetParameter",
+                        "ssm:GetParameters",
+                        "ssm:GetParametersByPath",
+                    ],
+                    "Resource": f"arn:aws:ssm:{REGION}:{account_id}:parameter/*",
+                },
+                {
+                    "Sid": "SecretsManager",
+                    "Effect": "Allow",
+                    "Action": ["secretsmanager:GetSecretValue"],
+                    "Resource": "*",
+                },
+                {
+                    "Sid": "KMSDecrypt",
+                    "Effect": "Allow",
+                    "Action": ["kms:Decrypt"],
+                    "Resource": "*",
+                },
+            ]
+        })
+        ok(f"{ecs_exec_role} — SSM + Secrets policy applied")
+    except ClientError:
+        warn(f"{ecs_exec_role} not found — will be created by Terraform, run: python deploy.py iam  after terraform apply")
 
     for role_suffix in ["lambda-mcp", "gateway-role", "agent-role"]:
         track("iam-role", f"{PREFIX}-{role_suffix}",
@@ -988,8 +1045,7 @@ def step_agents():
              "--provenance=false",
              "--no-cache",
              "-t", tag,
-             "--build-arg", f"AGENT_NAME={agent}",
-             "--file", str(ROOT / "Dockerfile"),
+             "--file", str(ROOT / "agents" / agent / "Dockerfile"),
              str(ROOT)])
         ok(f"Pushed: {tag}")
         return tag
@@ -1002,7 +1058,7 @@ def step_agents():
             "AWS_REGION":          REGION,
             "AWS_DEFAULT_REGION":  REGION,
             "AGENT_ENV":           "prod",
-            "AGENT_NAME":          f"{agent_name}-agent",
+            "AGENT_NAME":          agent_name,  # no -agent suffix — Dockerfile uses: python -m agents.${AGENT_NAME}.app
             "LOG_GROUP_NAME":      log_group,
         }
         artifact = {"containerConfiguration": {"containerUri": image_tag}}

@@ -64,12 +64,12 @@ PYTHON = _find_python()
 # ── Agent / service definitions ───────────────────────────────────────────
 
 AGENTS = [
-    {"name": "research",   "module": "agents.research.app",   "port": 8001},
-    {"name": "knowledge",  "module": "agents.knowledge.app",  "port": 8002},
-    {"name": "chart",      "module": "agents.chart.app",      "port": 8005},
+    {"name": "research",   "module": "agents.research.app",   "port": 8001, "extra_env": {"AGENT_PORT": "8001"}},
+    {"name": "knowledge",  "module": "agents.knowledge.app",  "port": 8002, "extra_env": {"AGENT_PORT": "8002"}},
+    {"name": "chart",      "module": "agents.chart.app",      "port": 8005, "extra_env": {"AGENT_PORT": "8005"}},
     # Supervisor last — needs sub-agents healthy first
     {"name": "supervisor", "module": "agents.supervisor.app", "port": 8000,
-     "extra_env": {"LOCAL_MODE": "true"}},
+     "extra_env": {"LOCAL_MODE": "true", "AGENT_PORT": "8000"}},
 ]
 
 PLATFORM = {
@@ -436,7 +436,7 @@ def cmd_start(start_platform=True, skip_preflight=False, env_path=None, postgres
     hdr("Starting sub-agents...")
     for agent in AGENTS[:-1]:
         env_ov = {
-            "AGENT_NAME": agent["name"] + "-agent",
+            "AGENT_NAME": agent["name"],
             "AGENT_ENV":  "prod",
             **agent.get("extra_env", {}),
         }
@@ -453,7 +453,7 @@ def cmd_start(start_platform=True, skip_preflight=False, env_path=None, postgres
     # Start supervisor (after sub-agents are healthy)
     sup = AGENTS[-1]
     env_ov = {
-        "AGENT_NAME": "supervisor-agent",
+        "AGENT_NAME": "supervisor",
         "AGENT_ENV":  "prod",
         **sup.get("extra_env", {}),
     }
