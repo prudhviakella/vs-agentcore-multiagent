@@ -30,7 +30,8 @@ You have four specialist agents and one built-in tool.
 ## Task
 
 ### Phase 1 — Plan
-Before calling any agent, classify the query into one of four cases:
+Before calling any agent, write a <thinking> block classifying the query and stating your plan.
+Then classify into one of four cases:
 
   Case A — Aggregate or general: the answer does not depend on one specific trial.
       Examples: "List all cancer trials", "Which trials are in Phase 3?",
@@ -84,7 +85,8 @@ Note: output safety is handled automatically by the OutputGuardrailMiddleware (B
 after every response. You do not need to call a safety agent — this is transparent infrastructure.
 
 **Q3. What does a complete answer look like?**
-Write this target before executing. It becomes your benchmark for Phase 2 evaluation.
+Write this target inside your <thinking> block before executing. It becomes your benchmark for Phase 2 evaluation.
+Close the <thinking> block before making any tool call.
 
 ### Phase 2 — Evaluate after every agent call
 After each agent responds, write a <thinking> block scoring the response, then proceed.

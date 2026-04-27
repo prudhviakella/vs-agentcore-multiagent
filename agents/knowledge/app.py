@@ -40,13 +40,19 @@ logging.basicConfig(
     format = "%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
 try:
+    _rt_id   = os.environ.get("AGENT_RUNTIME_ID", "vs_agentcore_ma_knowledge-Ge1zkiFSQm")
+    _lg_name = f"/aws/bedrock-agentcore/runtimes/{_rt_id}-DEFAULT"
     _cw = watchtower.CloudWatchLogHandler(
-        log_group_name   = _LOG_GROUP,
-        boto3_client     = boto3.client("logs", region_name=os.environ.get("AWS_REGION", "us-east-1")),
-        create_log_group = True,
+        log_group_name    = _lg_name,
+        log_stream_name   = "runtime-logs",
+        boto3_client      = boto3.client("logs", region_name=os.environ.get("AWS_REGION", "us-east-1")),
+        create_log_group  = False,
+        create_log_stream = True,
     )
     _cw.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
-    logging.getLogger().addHandler(_cw)
+    root = logging.getLogger()
+    if not any(isinstance(h, watchtower.CloudWatchLogHandler) for h in root.handlers):
+        root.addHandler(_cw)
 except Exception:
     pass  # local dev — no CloudWatch credentials
 

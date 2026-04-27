@@ -2,73 +2,6 @@
 agents/supervisor/a2a_tools.py
 ================================
 A2A tool wrappers — dynamically built from agent registry in SSM.
-
-FIXES in this file:
-
-  FIX (Issue #4 — prod path didn't capture span_data):
-    BEFORE: _invoke_sub_agent() prod path parsed SSE events inline with a
-            separate loop that discarded the "span" event type entirely:
-              return full_answer, {}  # span_data not available in prod path yet
-
-            This meant TracerMiddleware._append_span() never fired in production,
-            so the Supervisor's DynamoDB trace had empty agent_spans=[].
-            Distributed tracing was silently broken in prod (only worked in LOCAL_MODE).
-
-    AFTER:  The prod path now calls _parse_sse_stream() — the same function
-            used by the local path. This captures "span" events and returns
-            (full_answer, span_data) in both paths identically.
-
-            _parse_sse_stream() is no longer exclusive to LOCAL_MODE. The
-            only difference between the two paths is how they obtain the
-            line iterator:
-              LOCAL  → httpx async stream → _line_iter()
-              PROD   → boto3 chunk queue  → _chunk_queue_to_lines()
-
-  FIX (Issue #6 — no pre-flight check for runtime ARNs):
-    BEFORE: Missing ARNs only surfaced as RuntimeError mid-request when a
-            sub-agent was actually called for the first time. The user saw
-            an error response, not a startup failure.
-
-    AFTER:  preflight_check_arns() is called from build_a2a_tools() at cold
-            start. It validates that every agent in the registry has a
-            corresponding ARN entry in SSM. Missing ARNs raise RuntimeError
-            at startup — fail fast, not mid-request.
-
-            LOCAL_MODE skips the check (ports used instead of ARNs).
-
-AGENT REGISTRY:
-  SSM path: {SSM_PREFIX}/agents/registry
-  Value: JSON array of agent descriptors:
-  [
-    {
-      "name":        "research",
-      "description": "Search clinical trial documents...",
-      "port":        8001
-    },
-    ...
-  ]
-
-ADDING A NEW AGENT (no code changes needed):
-  1. Deploy new AgentCore Runtime
-  2. Update SSM registry:
-       aws ssm put-parameter \\
-         --name /vs-agentcore-multiagent/prod/agents/registry \\
-         --value '[...existing..., {"name":"new_agent","description":"...","port":8006}]' \\
-         --type String --overwrite
-  3. Supervisor picks up the new agent on next cold start
-
-HOW STREAMING WORKS:
-  LLM calls research_agent("query")
-    → @tool runs async
-    → _invoke_sub_agent() streams from Research Agent
-    → puts tokens on token_queue (side channel)
-    → Supervisor handler() drains token_queue simultaneously
-    → user sees tokens in real time
-    → @tool returns full answer to LLM when done
-
-LOCAL_MODE:
-  Set LOCAL_MODE=true to call sub-agents via HTTP on localhost instead
-  of invoke_agent_runtime(). Ports come from registry descriptor.
 """
 from __future__ import annotations
 
@@ -93,10 +26,6 @@ LOCAL_MODE = os.environ.get("LOCAL_MODE", "false").lower() == "true"
 
 _executor = ThreadPoolExecutor(max_workers=10)
 
-
-# ── Span buffer — keyed by thread_id ─────────────────────────────────────────
-# Stores sub-agent spans during a Supervisor request.
-# TracerMiddleware reads this in after_agent via pop_span_buffer().
 _span_buffer: dict[str, list] = {}
 _span_buffer_lock = __import__("threading").Lock()
 
@@ -109,12 +38,9 @@ def _append_span(thread_id: str, span: dict) -> None:
 
 
 def pop_span_buffer(thread_id: str) -> list:
-    """Called by TracerMiddleware.after_agent to get sub-agent spans."""
     with _span_buffer_lock:
         return _span_buffer.pop(thread_id, [])
 
-
-# ── HITL Interrupt ────────────────────────────────────────────────────────────
 
 class HITLInterrupt(Exception):
     def __init__(self, question: str, options: list[str], allow_freetext: bool = True):
@@ -124,25 +50,13 @@ class HITLInterrupt(Exception):
         super().__init__(f"HITL: {question}")
 
 
-# ── Supervisor-native HITL tool ──────────────────────────────────────────────
-
 class AskUserInput(BaseModel):
     question:      str       = Field(description="The clarifying question to ask the user")
-    options:       list[str] = Field(description="List of specific options for the user to choose from (2-6 items). Each option should be a real trial name or specific category from the database.")
+    options:       list[str] = Field(description="List of specific options for the user to choose from (2-6 items).")
     allow_freetext: bool     = Field(default=True, description="Whether to allow free-text response in addition to options")
 
 
 def build_ask_user_tool() -> Any:
-    """
-    Build the ask_user HITL tool for the Supervisor.
-
-    When the LLM calls this tool, it raises HITLInterrupt which is caught
-    by the Supervisor app.py handler and sent to the UI as an interrupt event.
-
-    IMPORTANT: The LLM should FIRST search for real candidates using
-    research_agent or knowledge_agent, THEN call ask_user with real options.
-    Never call ask_user with made-up or training-knowledge options.
-    """
     async def ask_user_func(question: str, options: list[str], allow_freetext: bool = True) -> str:
         log.info(f"[Supervisor] HITL interrupt: question='{question}'  options={options}")
         raise HITLInterrupt(
@@ -164,15 +78,8 @@ def build_ask_user_tool() -> Any:
     )
 
 
-# ── Agent Registry ────────────────────────────────────────────────────────────
-
 @lru_cache(maxsize=1)
 def _get_agent_registry() -> list[dict]:
-    """
-    Load agent registry from SSM.
-    Cached — reloads only on cold start.
-    To add a new agent: update SSM registry and restart Supervisor.
-    """
     ssm = boto3.client("ssm", region_name=REGION)
     try:
         value    = ssm.get_parameter(Name=f"{SSM_PREFIX}/agents/registry")["Parameter"]["Value"]
@@ -180,17 +87,13 @@ def _get_agent_registry() -> list[dict]:
         log.info(f"[A2A] Registry loaded from SSM ({len(registry)} agents): {[a['name'] for a in registry]}")
         return registry
     except ssm.exceptions.ParameterNotFound:
-        raise RuntimeError(
-            f"Agent registry not found at {SSM_PREFIX}/agents/registry. "
-            f"Run: ./scripts/deploy.sh registry"
-        )
+        raise RuntimeError(f"Agent registry not found at {SSM_PREFIX}/agents/registry.")
     except Exception as exc:
         raise RuntimeError(f"Failed to load agent registry from SSM: {exc}")
 
 
 @lru_cache(maxsize=1)
 def _get_runtime_arns() -> dict[str, str]:
-    """Load sub-agent runtime ARNs from SSM. Cached."""
     ssm      = boto3.client("ssm", region_name=REGION)
     registry = _get_agent_registry()
     arns     = {}
@@ -208,63 +111,23 @@ def _get_runtime_arns() -> dict[str, str]:
 
 
 def preflight_check_arns() -> None:
-    """
-    FIX (Issue #6): Validate that every registered agent has a runtime ARN.
-    Called at cold start from build_a2a_tools() when LOCAL_MODE=false.
-
-    WHY at cold start (not per-request):
-      Missing ARNs should be surfaced as a deployment error, not a user error.
-      Failing fast at startup means the container won't start in a broken state,
-      which is immediately visible in AgentCore health checks and CloudWatch.
-      Without this, the first user to trigger a missing agent gets an error
-      response — confusing and hard to distinguish from an agent bug.
-
-    Raises:
-      RuntimeError: listing all agents that are missing ARNs. One error
-                    message covers all missing agents so you don't have to
-                    fix them one at a time.
-    """
     registry = _get_agent_registry()
     arns     = _get_runtime_arns()
     missing  = [a["name"] for a in registry if a["name"] not in arns]
 
     if missing:
         raise RuntimeError(
-            f"[A2A] Pre-flight failed — missing runtime ARNs for: {missing}. "
-            f"Deploy these agents first, then update SSM:\n"
-            + "\n".join(
-                f"  aws ssm put-parameter "
-                f"--name {SSM_PREFIX}/agents/{name}/runtime_arn "
-                f"--value <arn> --type String --overwrite"
-                for name in missing
-            )
+            f"[A2A] Pre-flight failed — missing runtime ARNs for: {missing}."
         )
 
     log.info(f"[A2A] Pre-flight passed — all {len(arns)} ARNs present: {list(arns.keys())}")
 
-
-# ── SSE stream parser ─────────────────────────────────────────────────────────
 
 async def _parse_sse_stream(
     agent_name:  str,
     line_iter:   AsyncIterator[str],
     token_queue: asyncio.Queue,
 ) -> tuple[str, dict]:
-    """
-    FIX (Issue #4): Shared SSE parser used by BOTH local and prod paths.
-
-    BEFORE: prod path had its own inline SSE parsing loop that silently
-            dropped "span" events, returning {} for span_data always.
-
-    AFTER:  Both paths call this function. The only difference is the
-            line_iter source:
-              LOCAL → _sse_lines_from_httpx()
-              PROD  → _sse_lines_from_queue()
-
-    Returns:
-        (full_answer, span_data) where span_data contains observability
-        metadata emitted by the sub-agent as a {"type": "span"} event.
-    """
     full_answer = ""
     span_data   = {}
 
@@ -308,9 +171,6 @@ async def _parse_sse_stream(
             raise RuntimeError(f"Sub-agent '{agent_name}': {event.get('message', '')}")
 
         elif etype == "span":
-            # FIX: span events now captured in BOTH paths.
-            # Sub-agent emits observability metadata. Supervisor collects
-            # these and writes ONE unified DynamoDB trace record.
             span_data = event.get("data", {})
             span_data["agent"] = agent_name
             log.debug(f"[A2A] Span captured from {agent_name}: {list(span_data.keys())}")
@@ -324,29 +184,19 @@ async def _parse_sse_stream(
 
 
 async def _sse_lines_from_httpx(response) -> AsyncIterator[str]:
-    """Yield SSE lines from an httpx streaming response (LOCAL_MODE)."""
     async for line in response.aiter_lines():
         yield line
 
 
 async def _sse_lines_from_queue(queue: asyncio.Queue) -> AsyncIterator[str]:
-    """
-    Yield SSE lines from the boto3 chunk queue (PROD path).
-
-    FIX: replaces the inline loop in the original prod path. By producing
-    a line iterator, the prod path can now call _parse_sse_stream() with
-    the same interface as the local path.
-    """
     while True:
         chunk = await queue.get()
         if chunk is None:
-            return  # sentinel — stream complete
-        text = chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+            return
+        text = chunk.decode("utf-8", errors="replace") if isinstance(chunk, bytes) else chunk
         for line in text.splitlines():
             yield line
 
-
-# ── Core invoke ───────────────────────────────────────────────────────────────
 
 async def _invoke_sub_agent_local(
     agent_name:  str,
@@ -354,7 +204,6 @@ async def _invoke_sub_agent_local(
     token_queue: asyncio.Queue,
     port:        int,
 ) -> tuple[str, dict]:
-    """LOCAL_MODE: call sub-agent via HTTP on localhost."""
     url = f"http://localhost:{port}/invocations"
     log.info(f"[A2A LOCAL] {agent_name} → {url}")
 
@@ -375,19 +224,10 @@ async def _invoke_sub_agent_prod(
     payload:     dict,
     token_queue: asyncio.Queue,
 ) -> tuple[str, dict]:
-    """
-    PROD: invoke sub-agent via invoke_agent_runtime() and parse SSE stream.
-
-    FIX (Issue #4): now calls _parse_sse_stream() via _sse_lines_from_queue()
-    so "span" events are captured and returned in span_data. Previously this
-    path had its own inline loop that discarded span events and returned {}.
-    """
     arns = _get_runtime_arns()
     if agent_name not in arns:
         raise RuntimeError(
-            f"No runtime ARN for '{agent_name}'. "
-            f"Available: {list(arns.keys())}. "
-            f"Run preflight_check_arns() at cold start to catch this earlier."
+            f"No runtime ARN for '{agent_name}'. Available: {list(arns.keys())}."
         )
 
     runtime_arn = arns[agent_name]
@@ -405,9 +245,17 @@ async def _invoke_sub_agent_prod(
             )
             streaming_body = response.get("response")
             if streaming_body:
-                for chunk in streaming_body.iter_chunks(chunk_size=1024):
+                _partial = b""
+                for chunk in streaming_body.iter_chunks(chunk_size=65536):
                     if chunk:
-                        loop.call_soon_threadsafe(chunk_queue.put_nowait, chunk)
+                        _partial += chunk
+                        if b"\n" in _partial:
+                            last_nl  = _partial.rfind(b"\n")
+                            complete = _partial[:last_nl + 1]
+                            _partial = _partial[last_nl + 1:]
+                            loop.call_soon_threadsafe(chunk_queue.put_nowait, complete)
+                if _partial:
+                    loop.call_soon_threadsafe(chunk_queue.put_nowait, _partial)
             else:
                 raw = response.get("body", b"")
                 if raw:
@@ -416,11 +264,10 @@ async def _invoke_sub_agent_prod(
             err = json.dumps({"type": "error", "message": str(exc)}).encode()
             loop.call_soon_threadsafe(chunk_queue.put_nowait, err)
         finally:
-            loop.call_soon_threadsafe(chunk_queue.put_nowait, None)   # sentinel
+            loop.call_soon_threadsafe(chunk_queue.put_nowait, None)
 
     loop.run_in_executor(_executor, _stream_in_thread)
 
-    # FIX: use shared _parse_sse_stream via _sse_lines_from_queue
     full_answer, span_data = await _parse_sse_stream(
         agent_name, _sse_lines_from_queue(chunk_queue), token_queue
     )
@@ -434,13 +281,10 @@ async def _invoke_sub_agent(
     token_queue: asyncio.Queue,
     port:        int = 0,
 ) -> tuple[str, dict]:
-    """Route to local or prod invoke path."""
     if LOCAL_MODE:
         return await _invoke_sub_agent_local(agent_name, payload, token_queue, port)
     return await _invoke_sub_agent_prod(agent_name, payload, token_queue)
 
-
-# ── Dynamic tool factory ──────────────────────────────────────────────────────
 
 class AgentInput(BaseModel):
     query: str = Field(description="The query or task to send to this agent")
@@ -451,22 +295,6 @@ def build_a2a_tools(
     domain:      str,
     token_queue: asyncio.Queue,
 ) -> list[Any]:
-    """
-    Dynamically build A2A tools from the agent registry.
-
-    FIX (Issue #6): runs preflight_check_arns() at cold start (prod only)
-    so missing ARNs fail fast with a clear error message instead of
-    silently failing mid-request for the first affected user.
-
-    Args:
-        session_id:  User thread_id passed to every sub-agent.
-        domain:      "pharma" passed to sub-agents.
-        token_queue: Sub-agent events put here for Supervisor to re-stream.
-
-    Returns:
-        List of StructuredTool objects, one per registered agent + ask_user.
-    """
-    # FIX: pre-flight — validates all ARNs present before accepting requests
     if not LOCAL_MODE:
         preflight_check_arns()
 
@@ -482,12 +310,8 @@ def build_a2a_tools(
             async def tool_func(query: str) -> str:
                 log.info(f"[Supervisor] → {agent_name}  query={query[:60]}...")
 
-                # Agent-scoped session_id prevents checkpoint cross-contamination
                 agent_session_id = f"{session_id}__{agent_name}"
-
-                # Safety agent: use throwaway queue so PASSED/BLOCKED text
-                # is intercepted before reaching the user stream
-                effective_queue = asyncio.Queue() if agent_name == "safety" else token_queue
+                effective_queue  = asyncio.Queue() if agent_name == "safety" else token_queue
 
                 t0 = asyncio.get_event_loop().time()
                 answer, span_data = await _invoke_sub_agent(
@@ -498,7 +322,6 @@ def build_a2a_tools(
                 )
                 elapsed_ms = round((asyncio.get_event_loop().time() - t0) * 1000, 2)
 
-                # Safety verdict forwarding
                 if agent_name == "safety":
                     verdict       = answer.strip()
                     verdict_upper = verdict.upper()
@@ -512,7 +335,6 @@ def build_a2a_tools(
                         await token_queue.put({"type": "safety_passed"})
                         log.info(f"[A2A] Safety unknown verdict — treating as PASSED: {verdict[:40]}")
 
-                # Buffer span for TracerMiddleware (after_agent reads via pop_span_buffer)
                 span_data.setdefault("agent",      agent_name)
                 span_data.setdefault("elapsed_ms", elapsed_ms)
                 span_data.setdefault("status",     "ok")
@@ -533,19 +355,12 @@ def build_a2a_tools(
         tools.append(tool)
         log.info(f"[A2A] Registered tool: {name}_agent")
 
-    # Supervisor-native HITL tool (not from registry — always present)
     tools.append(build_ask_user_tool())
     log.info(f"[A2A] Built {len(tools)} tools: {[t.name for t in tools]}")
     return tools
 
 
-# ── SSM registry writer ───────────────────────────────────────────────────────
-
 def register_agent(name: str, description: str, port: int = 0) -> None:
-    """
-    Add or update an agent in the SSM registry.
-    Call after deploying a new AgentCore Runtime.
-    """
     registry = list(_get_agent_registry())
     for i, entry in enumerate(registry):
         if entry["name"] == name:

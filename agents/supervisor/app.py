@@ -51,13 +51,19 @@ logging.basicConfig(
     format = "%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
 try:
+    _rt_id   = os.environ.get("AGENT_RUNTIME_ID", "vs_agentcore_ma_supervisor-S2wbNj9c4x")
+    _lg_name = f"/aws/bedrock-agentcore/runtimes/{_rt_id}-DEFAULT"
     _cw = watchtower.CloudWatchLogHandler(
-        log_group_name   = _LOG_GROUP,
-        boto3_client     = boto3.client("logs", region_name=os.environ.get("AWS_REGION", "us-east-1")),
-        create_log_group = True,
+        log_group_name    = _lg_name,
+        log_stream_name   = "runtime-logs",
+        boto3_client      = boto3.client("logs", region_name=os.environ.get("AWS_REGION", "us-east-1")),
+        create_log_group  = False,
+        create_log_stream = True,
     )
     _cw.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
-    logging.getLogger().addHandler(_cw)
+    root = logging.getLogger()
+    if not any(isinstance(h, watchtower.CloudWatchLogHandler) for h in root.handlers):
+        root.addHandler(_cw)
 except Exception:
     pass  # local dev — no CloudWatch credentials
 
@@ -139,7 +145,9 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
             "recursion_limit": 100,  # 20 tool calls × ~5 graph steps each
         }
         agent_context = {"user_id": thread_id, "session_id": thread_id, "domain": domain}
-
+        os.environ["LANGSMITH_API_KEY"] = "REMOVED_SEE_SSM"
+        os.environ["LANGSMITH_PROJECT"] = "langchain-agent-experiments"
+        os.environ["LANGSMITH_TRACING"] = "true"
         agent = await build_supervisor_agent(
             session_id  = thread_id,
             domain      = domain,

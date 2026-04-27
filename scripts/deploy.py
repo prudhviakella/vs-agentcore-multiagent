@@ -324,7 +324,6 @@ def step_prompts():
     bedrock = c("bedrock-agent")
     ssm     = c("ssm")
 
-    ENV    = "prod"
     agents = ["supervisor", "research", "knowledge", "safety", "chart"]
 
     for agent in agents:
@@ -417,13 +416,6 @@ def step_prompts():
 
         ssm.put_parameter(Name=ssm_id_key,  Value=prompt_id,      Type="String", Overwrite=True)
         ssm.put_parameter(Name=ssm_ver_key, Value=prompt_version, Type="String", Overwrite=True)
-
-        # Also write to short path (/{agent}/prod/) — AGENT_NAME env var is set to
-        # "supervisor" not "supervisor-agent", so core/aws.py reads /{agent}/prod/ first
-        short_id_key  = f"/{agent}/{ENV}/bedrock/prompt_id"
-        short_ver_key = f"/{agent}/{ENV}/bedrock/prompt_version"
-        ssm.put_parameter(Name=short_id_key,  Value=prompt_id,      Type="String", Overwrite=True)
-        ssm.put_parameter(Name=short_ver_key, Value=prompt_version, Type="String", Overwrite=True)
         ok(f"[{agent}]  prompt_id={prompt_id}  version={prompt_version}")
 
         try:
@@ -1027,7 +1019,7 @@ def step_platform():
         print("  \u26a0\ufe0f  MANUAL STEP: set POSTGRES_URL in .env then re-run: python deploy.py secrets")
 
 
-def step_agents():
+def step_agents(only=None):
     header("Step 6: AgentCore Runtimes")
     account_id = get_account_id()
     ecr_base   = ecr_login(account_id)
@@ -1106,7 +1098,11 @@ def step_agents():
         "supervisor":"Supervisor Agent — A2A routing + full middleware stack",
     }
 
-    for agent in SUB_AGENTS:
+    if only:
+        info(f"Deploying only: {only}")
+
+    agents_to_deploy = [a for a in SUB_AGENTS if not only or a == only]
+    for agent in agents_to_deploy:
         print(f"\n  \u2500\u2500 {agent}")
         try:
             tag = build_and_push(agent)
@@ -1114,13 +1110,14 @@ def step_agents():
         except Exception as e:
             warn(f"{agent} failed: {e} — continuing")
 
-    print(f"\n  \u2500\u2500 supervisor (last — reads sub-agent ARNs from SSM)")
-    try:
-        tag = build_and_push("supervisor")
-        deploy_runtime("supervisor", descriptions["supervisor"], tag)
-    except Exception as e:
-        fail(f"Supervisor deployment failed: {e}")
-        sys.exit(1)
+    if not only or only == "supervisor":
+        print(f"\n  \u2500\u2500 supervisor (last — reads sub-agent ARNs from SSM)")
+        try:
+            tag = build_and_push("supervisor")
+            deploy_runtime("supervisor", descriptions["supervisor"], tag)
+        except Exception as e:
+            fail(f"Supervisor deployment failed: {e}")
+            sys.exit(1)
 
     for agent in AGENTS:
         track("ecr-repo", f"{PREFIX}/agent-{agent}",
@@ -1286,7 +1283,7 @@ def main():
         "gateway":    step_gateway,
         "platform":   step_platform,
         "plan":       step_platform,
-        "agents":     step_agents,
+        "agents":     lambda: step_agents(only=next((sys.argv[i+1] for i,a in enumerate(sys.argv) if a=="--agent" and i+1<len(sys.argv)), None)),
         "ssm-arns":   step_ssm_arns,
         "registry":   step_registry,
         "all":        step_all,
