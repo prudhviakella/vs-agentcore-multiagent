@@ -1,18 +1,14 @@
 """
 agents/research/app.py
-=======================
+====================
 Research Agent — AgentCore Runtime Entrypoint.
 
-IDENTICAL pattern to vs-agentcore-platform-aws/agent/app.py with these
-differences:
-  1. Tool filter  : only search_tool + summariser_tool
-  2. No middleware : Supervisor owns all cross-cutting concerns
-  3. No HITL paths: Research Agent never interrupts
-  4. AGENT_NAME   : "research-agent" set by Terraform
-                    → drives SSM prompt path via core/aws.get_bedrock_prompt()
+Called by the Supervisor via invoke_agent_runtime().
+Streams SSE events back: token, tool_start, tool_end, chart (chart only), done, error.
 
-CALLED BY:
-  Supervisor's research_agent @tool in a2a_tools.py via invoke_agent_runtime().
+AgentCore automatically pipes stdout to CloudWatch:
+  /aws/bedrock-agentcore/runtimes/{runtime_id}-DEFAULT
+No Watchtower handler needed — logging.basicConfig() to stdout is sufficient.
 """
 
 import json
@@ -22,68 +18,92 @@ import re
 import time
 
 import boto3
-import watchtower
 from bedrock_agentcore import BedrockAgentCoreApp, BedrockAgentCoreContext
 
 from agents.research.agent import build_research_agent
 from core.mcp_client import get_mcp_tools
 
-_LOG_GROUP = os.environ.get("LOG_GROUP_NAME", "/agentcore/vs-agentcore-ma/research-agent")
-
+# Stdout → AgentCore → CloudWatch (automatic — no Watchtower needed)
 logging.basicConfig(
     level  = logging.INFO,
     format = "%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
-try:
-    _rt_id   = os.environ.get("AGENT_RUNTIME_ID", "vs_agentcore_ma_research-k2xtiTD288")
-    _lg_name = f"/aws/bedrock-agentcore/runtimes/{_rt_id}-DEFAULT"
-    _cw = watchtower.CloudWatchLogHandler(
-        log_group_name    = _lg_name,
-        log_stream_name   = "runtime-logs",
-        boto3_client      = boto3.client("logs", region_name=os.environ.get("AWS_REGION", "us-east-1")),
-        create_log_group  = False,
-        create_log_stream = True,
-    )
-    _cw.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
-    root = logging.getLogger()
-    if not any(isinstance(h, watchtower.CloudWatchLogHandler) for h in root.handlers):
-        root.addHandler(_cw)
-except Exception:
-    pass  # local dev — no CloudWatch credentials
-
 log = logging.getLogger(__name__)
 
 app    = BedrockAgentCoreApp()
 _agent = None
+
+# Prevents two concurrent first requests both triggering cold start
+_agent_lock = __import__("asyncio").Lock()
 
 RESEARCH_TOOLS = {
     "tool-search___search_tool",
     "tool-summariser___summariser_tool",
 }
 
-# Same tail-buffer + EPISODIC strip as single agent (precaution)
+# Strips the EPISODIC memory tag gpt-5.5 appends to every response.
+# Must never reach the Supervisor or UI.
 _EPISODIC_PATTERN = re.compile(r'\s*\nEPISODIC:\s*(YES|NO)[\d.\s]*$', re.IGNORECASE)
 _TAIL_SIZE = 60
 
 
+def _load_langsmith_from_ssm() -> None:
+    """
+    Load LangSmith tracing credentials from Secrets Manager.
+    Called at cold start after IAM credentials are available.
+    Short-circuits if LANGSMITH_API_KEY already set (local dev).
+    """
+    if os.environ.get("LANGSMITH_API_KEY"):
+        return
+    try:
+        prefix = os.environ.get("SSM_PREFIX", "/vs-agentcore-multiagent/prod")
+        sm     = boto3.client("secretsmanager", region_name="us-east-1")
+        secret = json.loads(sm.get_secret_value(SecretId=f"{prefix}/langsmith")["SecretString"])
+        os.environ["LANGSMITH_API_KEY"] = secret.get("api_key", "")
+        os.environ["LANGSMITH_PROJECT"]  = secret.get("project", "langchain-agent-experiments")
+        os.environ["LANGSMITH_TRACING"]  = secret.get("tracing", "true")
+        log.info(f"[Research] LangSmith loaded from SSM")
+    except Exception as e:
+        log.warning(f"[Research] LangSmith not available — tracing disabled: {e}")
+
+
+
 async def _ensure_agent():
+    """
+    Build the agent once on first request, reuse on all subsequent requests.
+
+    Uses a double-checked lock:
+      Fast path  — agent already built, return immediately (no lock)
+      Slow path  — first request, acquire lock, build agent, release lock
+      Guard      — second request waiting on lock sees agent already built
+    """
     global _agent
-    if _agent is None:
-        log.info("[Research] Cold start — building agent")
+    if _agent is not None:
+        return _agent  # fast path — already initialised
+
+    import asyncio
+    async with _agent_lock:
+        if _agent is not None:
+            return _agent  # another coroutine built it while we waited
+
+        log.info(f"[Research] Cold start — building agent")
 
         if not os.environ.get("OPENAI_API_KEY"):
             prefix = os.environ.get("SSM_PREFIX", "/vs-agentcore-multiagent/prod")
             sm     = boto3.client("secretsmanager", region_name="us-east-1")
             secret = json.loads(sm.get_secret_value(SecretId=f"{prefix}/openai")["SecretString"])
             os.environ["OPENAI_API_KEY"] = secret.get("api_key", "")
-            log.info("[Research] OpenAI key loaded")
+            log.info(f"[Research] OpenAI key loaded")
+
+        # Load LangSmith now — IAM credentials available at this point
+        _load_langsmith_from_ssm()
 
         all_tools = await get_mcp_tools()
         tools     = [t for t in all_tools if t.name in RESEARCH_TOOLS]
         log.info(f"[Research] Tools: {[t.name for t in tools]}")
 
         _agent = await build_research_agent(tools=tools)
-        log.info("[Research] Agent ready")
+        log.info(f"[Research] Agent ready")
 
     return _agent
 
@@ -94,13 +114,16 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
     Invoked by Supervisor via invoke_agent_runtime().
 
     payload:
-        message    — research query
-        session_id — user thread_id
+        message    — the query
+        session_id — user thread_id (namespaced by supervisor: {thread_id}__research)
         domain     — "pharma"
 
     yields:
-        token, tool_start, tool_end, done, error
-        (same event types as single agent — Supervisor re-streams them)
+        token      — streamed LLM tokens
+        tool_start — MCP tool starting
+        tool_end   — MCP tool complete
+        done       — stream complete with full answer
+        error      — on failure
     """
     t0         = time.perf_counter()
     message    = payload.get("message",    "")
@@ -112,7 +135,7 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
     full_answer  = ""
     _tail_buffer = ""
 
-    def _flush_safe():
+    def _flush_safe() -> str:
         nonlocal _tail_buffer
         if len(_tail_buffer) > _TAIL_SIZE:
             safe         = _tail_buffer[:-_TAIL_SIZE]
@@ -174,7 +197,7 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
         yield {"type": "error", "message": str(exc)}
         return
 
-    # Flush tail
+    # Flush tail buffer — strips EPISODIC suffix before yielding final tokens
     if _tail_buffer:
         clean = _EPISODIC_PATTERN.sub("", _tail_buffer).rstrip()
         if clean:
@@ -183,13 +206,11 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
 
     elapsed = round((time.perf_counter() - t0) * 1_000, 2)
     log.info(f"[Research] Done  latency_ms={elapsed}  answer_len={len(full_answer)}")
-    # Emit observability span for Supervisor distributed tracing
+
+    # Observability span — consumed by TracerMiddleware in Supervisor
     yield {
         "type": "span",
-        "data": {
-            "agent":      "research",
-            "elapsed_ms": elapsed,
-        }
+        "data": {"agent": "research", "elapsed_ms": elapsed},
     }
     yield {"type": "done", "latency_ms": elapsed, "answer": full_answer}
 

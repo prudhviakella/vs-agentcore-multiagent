@@ -20,6 +20,5 @@ pydantic==2.11.1
 httpx==0.28.1
 tenacity==9.0.0
 numpy
-watchtower>=3.0.0
 neo4j==5.28.1
 mcp>=1.0.0

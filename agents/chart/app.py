@@ -1,34 +1,14 @@
 """
 agents/chart/app.py
-====================
+=================
 Chart Agent — AgentCore Runtime Entrypoint.
 
-IDENTICAL pattern to research/app.py with these differences:
-  1. Tool filter  : search_tool + summariser_tool + chart___chart_tool
-  2. AGENT_NAME   : "chart-agent" set by Terraform
-  3. Port         : 8005 (local dev)
-  4. Chart event  : detects {"type": "chart"} in tool output and yields it
+Called by the Supervisor via invoke_agent_runtime().
+Streams SSE events back: token, tool_start, tool_end, chart (chart only), done, error.
 
-RESPONSIBILITY:
-  Called by Supervisor when the query involves numerical comparison or
-  visualisation. The agent:
-    1. Searches Pinecone for numerical evidence (search_tool)
-    2. Extracts and synthesises the numbers (summariser_tool)
-    3. Generates a Chart.js JSON config (chart___chart_tool → chart_lambda)
-    4. Yields the chart config as a special event for the UI to render
-
-CHART EVENT:
-  {"type": "chart", "config": {...Chart.js config...}, "chart_type": "bar"}
-  UI detects this event and renders a Chart.js canvas inline in the chat bubble.
-  Supervisor re-streams this event through to Platform API → UI.
-
-EXAMPLE QUERIES ROUTED HERE:
-  "Compare efficacy across COVID-19 vaccine trials"
-  "Show me enrollment numbers for cancer trials"
-  "Visualise Phase distribution across all trials"
-
-CALLED BY:
-  Supervisor's chart_agent @tool in a2a_tools.py via invoke_agent_runtime().
+AgentCore automatically pipes stdout to CloudWatch:
+  /aws/bedrock-agentcore/runtimes/{runtime_id}-DEFAULT
+No Watchtower handler needed — logging.basicConfig() to stdout is sufficient.
 """
 
 import json
@@ -38,39 +18,23 @@ import re
 import time
 
 import boto3
-import watchtower
 from bedrock_agentcore import BedrockAgentCoreApp, BedrockAgentCoreContext
 
 from agents.chart.agent import build_chart_agent
 from core.mcp_client import get_mcp_tools
 
-_LOG_GROUP = os.environ.get("LOG_GROUP_NAME", "/agentcore/vs-agentcore-ma/chart-agent")
-
+# Stdout → AgentCore → CloudWatch (automatic — no Watchtower needed)
 logging.basicConfig(
     level  = logging.INFO,
     format = "%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
-try:
-    _rt_id   = os.environ.get("AGENT_RUNTIME_ID", "vs_agentcore_ma_chart-b1au1U2ioF")
-    _lg_name = f"/aws/bedrock-agentcore/runtimes/{_rt_id}-DEFAULT"
-    _cw = watchtower.CloudWatchLogHandler(
-        log_group_name    = _lg_name,
-        log_stream_name   = "runtime-logs",
-        boto3_client      = boto3.client("logs", region_name=os.environ.get("AWS_REGION", "us-east-1")),
-        create_log_group  = False,
-        create_log_stream = True,
-    )
-    _cw.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
-    root = logging.getLogger()
-    if not any(isinstance(h, watchtower.CloudWatchLogHandler) for h in root.handlers):
-        root.addHandler(_cw)
-except Exception:
-    pass  # local dev — no CloudWatch credentials
-
 log = logging.getLogger(__name__)
 
 app    = BedrockAgentCoreApp()
 _agent = None
+
+# Prevents two concurrent first requests both triggering cold start
+_agent_lock = __import__("asyncio").Lock()
 
 CHART_TOOLS = {
     "tool-search___search_tool",
@@ -78,28 +42,69 @@ CHART_TOOLS = {
     "tool-chart___chart_tool",
 }
 
+# Strips the EPISODIC memory tag gpt-5.5 appends to every response.
+# Must never reach the Supervisor or UI.
 _EPISODIC_PATTERN = re.compile(r'\s*\nEPISODIC:\s*(YES|NO)[\d.\s]*$', re.IGNORECASE)
 _TAIL_SIZE = 60
 
 
+def _load_langsmith_from_ssm() -> None:
+    """
+    Load LangSmith tracing credentials from Secrets Manager.
+    Called at cold start after IAM credentials are available.
+    Short-circuits if LANGSMITH_API_KEY already set (local dev).
+    """
+    if os.environ.get("LANGSMITH_API_KEY"):
+        return
+    try:
+        prefix = os.environ.get("SSM_PREFIX", "/vs-agentcore-multiagent/prod")
+        sm     = boto3.client("secretsmanager", region_name="us-east-1")
+        secret = json.loads(sm.get_secret_value(SecretId=f"{prefix}/langsmith")["SecretString"])
+        os.environ["LANGSMITH_API_KEY"] = secret.get("api_key", "")
+        os.environ["LANGSMITH_PROJECT"]  = secret.get("project", "langchain-agent-experiments")
+        os.environ["LANGSMITH_TRACING"]  = secret.get("tracing", "true")
+        log.info(f"[Chart] LangSmith loaded from SSM")
+    except Exception as e:
+        log.warning(f"[Chart] LangSmith not available — tracing disabled: {e}")
+
+
+
 async def _ensure_agent():
+    """
+    Build the agent once on first request, reuse on all subsequent requests.
+
+    Uses a double-checked lock:
+      Fast path  — agent already built, return immediately (no lock)
+      Slow path  — first request, acquire lock, build agent, release lock
+      Guard      — second request waiting on lock sees agent already built
+    """
     global _agent
-    if _agent is None:
-        log.info("[Chart] Cold start — building agent")
+    if _agent is not None:
+        return _agent  # fast path — already initialised
+
+    import asyncio
+    async with _agent_lock:
+        if _agent is not None:
+            return _agent  # another coroutine built it while we waited
+
+        log.info(f"[Chart] Cold start — building agent")
 
         if not os.environ.get("OPENAI_API_KEY"):
             prefix = os.environ.get("SSM_PREFIX", "/vs-agentcore-multiagent/prod")
             sm     = boto3.client("secretsmanager", region_name="us-east-1")
             secret = json.loads(sm.get_secret_value(SecretId=f"{prefix}/openai")["SecretString"])
             os.environ["OPENAI_API_KEY"] = secret.get("api_key", "")
-            log.info("[Chart] OpenAI key loaded")
+            log.info(f"[Chart] OpenAI key loaded")
+
+        # Load LangSmith now — IAM credentials available at this point
+        _load_langsmith_from_ssm()
 
         all_tools = await get_mcp_tools()
         tools     = [t for t in all_tools if t.name in CHART_TOOLS]
         log.info(f"[Chart] Tools: {[t.name for t in tools]}")
 
         _agent = await build_chart_agent(tools=tools)
-        log.info("[Chart] Agent ready")
+        log.info(f"[Chart] Agent ready")
 
     return _agent
 
@@ -110,16 +115,15 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
     Invoked by Supervisor via invoke_agent_runtime().
 
     payload:
-        message    — chart query e.g. "Compare COVID vaccine efficacy"
-        session_id — user thread_id
+        message    — the query
+        session_id — user thread_id (namespaced by supervisor: {thread_id}__chart)
         domain     — "pharma"
 
     yields:
-        token      — streamed answer text
-        tool_start — when search/summariser/chart tool starts
-        tool_end   — when tool completes
-        chart      — Chart.js config for UI to render inline
-        done       — with full answer
+        token      — streamed LLM tokens
+        tool_start — MCP tool starting
+        tool_end   — MCP tool complete
+        done       — stream complete with full answer
         error      — on failure
     """
     t0         = time.perf_counter()
@@ -132,7 +136,7 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
     full_answer  = ""
     _tail_buffer = ""
 
-    def _flush_safe():
+    def _flush_safe() -> str:
         nonlocal _tail_buffer
         if len(_tail_buffer) > _TAIL_SIZE:
             safe         = _tail_buffer[:-_TAIL_SIZE]
@@ -182,44 +186,42 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
 
             elif kind == "on_tool_end":
                 log.info(f"[Chart] ✓ {name}")
-                # Check if chart_tool returned a chart config
+
+                # Detect chart output from chart_tool and emit as typed event.
+                # chart_lambda returns {"chart": {...Chart.js config...}, "chart_type": "bar"}
+                # We unwrap MCP tool output which can arrive in several formats.
                 if "chart" in name:
                     import json as _json
                     output = data.get("output", {})
-                    log.info(f"[Chart] tool output type={type(output).__name__}  preview={str(output)[:200]}")
+                    raw    = output
 
-                    # MCP tools can return: string, dict, ToolMessage, or list of content blocks
-                    # Unwrap all possible formats
-                    raw = output
-
-                    # If it's a LangChain message object with content
+                    # Unwrap LangChain message object
                     if hasattr(raw, "content"):
                         raw = raw.content
 
-                    # If it's a list (content blocks), join text blocks
+                    # Unwrap content block list → join text fields
                     if isinstance(raw, list):
                         raw = " ".join(
                             block.get("text", "") if isinstance(block, dict) else str(block)
                             for block in raw
                         )
 
-                    # If it's a string, try JSON parse
+                    # Parse JSON string
                     if isinstance(raw, str):
                         try:
                             raw = _json.loads(raw)
                         except Exception:
                             pass
 
-                    log.info(f"[Chart] parsed output type={type(raw).__name__}  has_chart={'chart' in raw if isinstance(raw, dict) else False}")
-
-                    # chart_lambda returns {"chart": {...}, "chart_type": "bar"}
+                    # Yield chart event if config found
                     if isinstance(raw, dict) and "chart" in raw:
-                        log.info(f"[Chart] ✅ Chart config found: type={raw.get('chart_type')}")
+                        log.info(f"[Chart] Chart config found: type={raw.get('chart_type')}")
                         yield {
                             "type":       "chart",
                             "config":     raw["chart"],
                             "chart_type": raw.get("chart_type", "bar"),
                         }
+
                 yield {"type": "tool_end", "name": name}
 
     except Exception as exc:
@@ -232,7 +234,7 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
         yield {"type": "error", "message": str(exc)}
         return
 
-    # Flush tail
+    # Flush tail buffer — strips EPISODIC suffix before yielding final tokens
     if _tail_buffer:
         clean = _EPISODIC_PATTERN.sub("", _tail_buffer).rstrip()
         if clean:
@@ -241,13 +243,11 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
 
     elapsed = round((time.perf_counter() - t0) * 1_000, 2)
     log.info(f"[Chart] Done  latency_ms={elapsed}  answer_len={len(full_answer)}")
-    # Emit observability span for Supervisor distributed tracing
+
+    # Observability span — consumed by TracerMiddleware in Supervisor
     yield {
         "type": "span",
-        "data": {
-            "agent":      "chart",
-            "elapsed_ms": elapsed,
-        }
+        "data": {"agent": "chart", "elapsed_ms": elapsed},
     }
     yield {"type": "done", "latency_ms": elapsed, "answer": full_answer}
 
