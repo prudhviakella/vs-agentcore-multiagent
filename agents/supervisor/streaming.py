@@ -54,12 +54,26 @@ from agents.supervisor.a2a_tools import HITLInterrupt
 log = logging.getLogger(__name__)
 
 # Strips the episodic memory tag that gpt-5.5 appends to every response.
-# Pattern: optional whitespace + newline + "EPISODIC: YES/NO" + optional score
 _EPISODIC_PATTERN = re.compile(r'\s*\nEPISODIC:\s*(YES|NO)[\d.\s]*$', re.IGNORECASE)
 
+# Strips complete <thinking>...</thinking> blocks from token output.
+# gpt-5.5 leaks thinking blocks into the final answer token stream —
+# these are internal reasoning that must never reach the UI.
+_THINKING_PATTERN = re.compile(r'<thinking>[\s\S]*?</thinking>', re.IGNORECASE)
+
+# Orphaned open tag (no matching close) — strip from the open tag to end of string.
+# Happens when </thinking> is in the next flush window.
+# e.g. tail = "important context.<thinking>Note: log this"  → "important context."
+_THINKING_ORPHAN_OPEN  = re.compile(r'<thinking>[\s\S]*$', re.IGNORECASE)
+
+# Orphaned close tag (no matching open) — strip from start of string to the close tag.
+# Happens when <thinking> was in the previous flush window.
+# e.g. tail = "agent call result.</thinking>The answer is..."  → "The answer is..."
+_THINKING_ORPHAN_CLOSE = re.compile(r'^[\s\S]*?</thinking>', re.IGNORECASE)
+
 # How many chars to hold back at the end of the token stream.
-# 60 chars safely contains the longest possible EPISODIC suffix.
-_TAIL_SIZE = 60
+# 120 chars: enough for EPISODIC suffix (20 chars) AND a partial </thinking> tag (12 chars).
+_TAIL_SIZE = 120
 
 
 # ── HITL State Repair ──────────────────────────────────────────────────────
@@ -190,26 +204,36 @@ async def stream_supervisor(
         """
         Return the safe-to-emit portion of the tail buffer.
 
-        Holds back the last _TAIL_SIZE chars so we can strip the EPISODIC
-        suffix at the end of the stream without emitting it to the UI.
+        Holds back the last _TAIL_SIZE chars to allow:
+          - EPISODIC suffix stripping at stream end
+          - Partial </thinking> tag detection (tag is 12 chars)
 
-        Example:
-          buffer = "Phase 3 trials lead.\nEPISODIC: YES 0.95"
-          _flush_safe() → emits "Phase 3 trials lead."
-                        → holds "\nEPISODIC: YES 0.95" until stream end
-          _flush_tail() → strips pattern → emits nothing extra
+        Also strips any complete <thinking>...</thinking> blocks from the
+        safe portion before yielding — prevents reasoning leaking to the UI
+        when a thinking block closes entirely within the safe window.
         """
         nonlocal _tail_buffer
         if len(_tail_buffer) > _TAIL_SIZE:
-            safe         = _tail_buffer[:-_TAIL_SIZE]  # safe portion
-            _tail_buffer = _tail_buffer[-_TAIL_SIZE:]  # hold back tail
+            safe         = _tail_buffer[:-_TAIL_SIZE]
+            _tail_buffer = _tail_buffer[-_TAIL_SIZE:]
+            # Strip any complete thinking blocks in the safe portion
+            safe = _THINKING_PATTERN.sub("", safe)
+            safe = _THINKING_ORPHAN_OPEN.sub("", safe)
+            safe = _THINKING_ORPHAN_CLOSE.sub("", safe)
             return safe
         return ""  # not enough chars yet — hold everything
 
     def _flush_tail() -> str:
         """Flush and clean the entire tail buffer at end of stream."""
         nonlocal _tail_buffer
-        clean        = _EPISODIC_PATTERN.sub("", _tail_buffer).rstrip()
+        clean = _tail_buffer
+        # Strip complete thinking blocks first
+        clean = _THINKING_PATTERN.sub("", clean)
+        # Strip any orphaned tags that survived (e.g. open tag with no close)
+        clean = _THINKING_ORPHAN_OPEN.sub("", clean)
+        clean = _THINKING_ORPHAN_CLOSE.sub("", clean)
+        # Strip EPISODIC suffix
+        clean = _EPISODIC_PATTERN.sub("", clean).rstrip()
         _tail_buffer = ""
         return clean
 

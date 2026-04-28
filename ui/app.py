@@ -160,7 +160,7 @@ header{display:flex;align-items:center;justify-content:space-between;padding:0 2
 .meta-footer{font-size:11px;color:var(--text-3);margin-top:12px;padding-top:10px;border-top:1px solid var(--border);display:flex;gap:14px;font-weight:300;letter-spacing:.01em}
 
 /* tool step */
-.tool-step{display:flex;align-items:center;gap:10px;padding:9px 14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r);font-size:12.5px;font-weight:300;color:var(--text-2);max-width:320px;margin-left:42px;animation:fadeUp .18s ease;letter-spacing:.01em}
+.tool-step{display:flex;align-items:center;gap:10px;padding:9px 14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r);font-size:12.5px;font-weight:300;color:var(--text-2);animation:fadeUp .18s ease;letter-spacing:.01em;width:100%}
 .tool-step.done{color:var(--text-2);border-color:var(--border)}
 .tool-step.thinking{border-style:dashed;border-color:var(--border-2)}
 .spin{width:13px;height:13px;border:1.5px solid var(--border-2);border-top-color:var(--accent);border-radius:50%;animation:spin .65s linear infinite;flex-shrink:0}
@@ -170,7 +170,7 @@ header{display:flex;align-items:center;justify-content:space-between;padding:0 2
 @keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
 
 /* hitl */
-.hitl{background:var(--surface);border:1px solid var(--border);border-top:2px solid var(--accent);border-radius:var(--r-lg);padding:20px;max-width:500px;margin-left:42px;animation:fadeUp .18s ease}
+.hitl-card{background:var(--surface);border:1px solid var(--border);border-top:2px solid var(--accent);border-radius:var(--r-lg);padding:20px;animation:fadeUp .18s ease;width:100%}
 .hitl-tag{font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);margin-bottom:10px;display:flex;align-items:center;gap:6px;font-weight:500}
 .hitl-tag::before{content:'';width:5px;height:5px;background:var(--accent);border-radius:50%}
 .hitl-q{font-size:14px;font-weight:400;color:var(--text);margin-bottom:16px;line-height:1.55}
@@ -194,8 +194,8 @@ textarea::placeholder{color:var(--text-3)}
 .send svg{width:15px;height:15px}
 .new-btn{height:36px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r);cursor:pointer;color:var(--text-2);font-family:var(--font);font-size:12px;font-weight:300;padding:0 14px;transition:all .14s;white-space:nowrap}
 .new-btn:hover{border-color:var(--border-2);color:var(--text)}
-.err{background:rgba(255,77,106,.07);border:1px solid rgba(255,77,106,.25);border-radius:var(--r);padding:10px 14px;font-size:13px;font-weight:300;color:var(--red);margin-left:42px;max-width:460px;animation:fadeUp .18s ease}
-.thinking-wrap{margin-left:42px;max-width:640px;margin-bottom:6px;animation:fadeUp .18s ease}
+.err{background:rgba(255,77,106,.07);border:1px solid rgba(255,77,106,.25);border-radius:var(--r);padding:10px 14px;font-size:13px;font-weight:300;color:var(--red);animation:fadeUp .18s ease;width:100%}
+.thinking-wrap{margin-bottom:6px;animation:fadeUp .18s ease;width:100%}
 .thinking-toggle{display:flex;align-items:center;gap:7px;background:none;border:1px solid var(--border);border-radius:var(--r);padding:6px 12px;cursor:pointer;color:var(--text-2);font-family:var(--font);font-size:12px;font-weight:300;letter-spacing:.02em;transition:all .14s;width:auto}
 .thinking-toggle:hover{border-color:var(--border-2);color:var(--text)}
 .thinking-toggle .arr{font-size:10px;transition:transform .2s}
@@ -204,17 +204,17 @@ textarea::placeholder{color:var(--text-3)}
 @keyframes livepulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.3;transform:scale(.65)}}
 .thinking-body{display:none;margin-top:6px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:12px 16px;font-size:12.5px;font-weight:300;color:var(--text-2);line-height:1.7;white-space:pre-wrap;max-height:300px;overflow-y:auto}
 .thinking-body.open{display:block}
-.chart-wrap{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:20px;margin-left:42px;max-width:640px;animation:fadeUp .18s ease}
+.chart-wrap{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:20px;animation:fadeUp .18s ease;width:100%}
 .chart-wrap canvas{max-height:320px}
 @keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
 
 /* ── message rows ── */
-.row{display:flex;align-items:flex-start;gap:10px;margin-bottom:14px;animation:fadeUp .18s ease}
+.row{display:flex;align-items:flex-start;gap:10px;margin-bottom:10px;animation:fadeUp .18s ease}
 .row-user{flex-direction:row-reverse}
 .av{width:30px;height:30px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:500}
-.av-user{background:var(--accent);color:var(--bg)}
-.av-ai{background:var(--surface);border:1px solid var(--border);color:var(--text-2)}
-.bubble{max-width:640px;padding:12px 16px;border-radius:var(--r-lg);font-size:14px;line-height:1.7;font-weight:300}
+.av-user{background:var(--accent);color:var(--bg);flex-shrink:0}
+.av-ai{background:var(--surface);border:1px solid var(--border);color:var(--text-2);flex-shrink:0}
+.bubble{min-width:0;flex:1;padding:12px 16px;border-radius:var(--r-lg);font-size:14px;line-height:1.7;font-weight:300}
 .user-bubble{background:var(--surface);border:1px solid var(--border);color:var(--text);border-top-right-radius:4px}
 .agent-bubble{background:transparent;color:var(--text);border-top-left-radius:4px}
 .agent-bubble p{margin:0 0 10px}
@@ -381,71 +381,35 @@ async function sse(url, payload) {
   streaming = true;
   setDisabled(true);
 
-  // ── State — each variable has ONE purpose ────────────────────────────────
-  let agentEl      = null;   // answer bubble DOM element
-  let content      = '';     // accumulated answer text
-  let latency      = 0;
-  let started      = false;  // answer bubble has been opened
+  let toolEls        = [addToolStep('Thinking…', true)];
+  let agentEl        = null;
+  let content        = '';
+  let latency        = 0;
+  let started        = false;
+  let inThinking     = false;
+  let thinkingText   = '';
+  let thinkingEl     = null;
+  let discarding     = false;
+  let toolActive     = false;
+  let readyForAnswer = false;
+  let lastAnswerBuf  = '';
 
-  // Thinking card state
-  let cardEl       = null;   // single reasoning card (never recreated once made)
-  let cardText     = '';     // full cumulative text in card (grows, never reset)
-  let blockBuf     = '';     // current <thinking> block being streamed (reset per block)
-  let inThinking   = false;  // currently inside <thinking>...</thinking>
-
-  // Pre-buffer — accumulates tokens until we know where to route them
-  let prebuf       = '';
-
-  // Tool / flow control
-  let toolActive     = false; // between tool_start and tool_end
-  let discarding     = false; // junk tokens — drop them
-  let readyForAnswer = false; // chart fired — next non-thinking content is the answer
-  let lastAnswerBuf  = '';    // fallback: tokens captured during tool execution
-
-  // ── Persistent status indicator — always visible while processing ─────────
-  // One spinner that stays until the answer starts or an error occurs
-  const statusEl = addToolStep('Analysing…', true);
-
-  // ── Thinking card helpers ─────────────────────────────────────────────────
-  function openThinkingBlock() {
-    if (!cardEl) {
-      cardEl = addThinkingCard();
-      cardText = '';
-    } else {
-      if (cardText) cardText += '\n\n—\n\n';
-      reopenThinkingCard(cardEl);
-    }
-    blockBuf   = '';
-    inThinking = true;
-  }
-
-  function appendThinking(chunk) {
-    blockBuf += chunk;
-    // Strip partial closing tag from live display
-    const display = (cardText + blockBuf).replace(/<\/?t(h(i(n(k(i(n(g?)?)?)?)?)?)?)?>?$/i, '');
-    updateThinkingCard(cardEl, display);
-  }
-
-  function sealThinkingBlock() {
-    cardText  += blockBuf;
-    blockBuf   = '';
-    inThinking = false;
-    updateThinkingCard(cardEl, cardText);
-    sealThinkingCard(cardEl);
-  }
-
-  // ── Helpers ───────────────────────────────────────────────────────────────
   const isToolCallJson = s => (
     /^[\s\n]*(multi_tool_use|functions\.|\{|\[)/.test(s) ||
     /^[\s\n]*(Let me (use|call|check|retrieve|query|now|first)|I will (use|call|now|first)|I\'ll (use|call|now)|I need to (use|call|retrieve))/i.test(s)
   );
 
-  function removeStatus() {
-    if (statusEl && statusEl.parentNode) statusEl.remove();
+  function enterDiscard(bufSeed) {
+    discarding   = true;
+    thinkingText = bufSeed ? bufSeed.slice(-12) : '';
+    toolEls.filter(el => !el.classList.contains('done')).forEach(el => markDone(el, 'Done'));
+    toolEls = [];
+    toolEls.push(addToolStep('Processing…', true));
   }
 
   function startAnswer(firstChunk) {
-    removeStatus();
+    toolEls.filter(el => !el.classList.contains('done')).forEach(el => markDone(el, 'Done'));
+    toolEls = [];
     agentEl  = addAgentBubble();
     started  = true;
     content += firstChunk;
@@ -453,41 +417,37 @@ async function sse(url, payload) {
   }
 
   function handleAfterThinking(afterRaw) {
-    const after = afterRaw.trim();
+    const afterTrimmed = afterRaw.trim();
 
-    // Chart already fired — any non-junk content is the final answer
     if (readyForAnswer) {
       readyForAnswer = false;
-      if (after && !after.startsWith('<') && !isToolCallJson(afterRaw)) {
-        startAnswer(after);
+      discarding     = false;
+      thinkingText   = '';
+      if (afterTrimmed && !afterTrimmed.startsWith('<') && !isToolCallJson(afterRaw)) {
+        startAnswer(afterTrimmed);
       }
-      // else: answer will arrive on next token in PREBUF
       return;
     }
 
-    if (!after || isToolCallJson(afterRaw)) {
-      discarding = true; prebuf = after.slice(-12);
-      return;
-    }
-    if (after.startsWith('<thinking>')) {
-      openThinkingBlock();
-      const rest = after.slice('<thinking>'.length);
-      if (rest.includes('</thinking>')) {
-        const [blk, ...tail] = rest.split('</thinking>');
-        blockBuf = blk;
-        sealThinkingBlock();
-        lastAnswerBuf = '';
-        handleAfterThinking(tail.join('</thinking>'));
+    if (!afterTrimmed || isToolCallJson(afterRaw)) {
+      enterDiscard(afterTrimmed);
+    } else if (afterTrimmed.startsWith('<thinking>')) {
+      inThinking   = true;
+      if (!thinkingEl) {
+        thinkingEl = addThinkingCard();
       } else {
-        appendThinking(rest);
+        reopenThinkingCard(thinkingEl);
+        thinkingText = thinkingText + '\n\n—\n\n';
       }
-      return;
+      thinkingText += afterTrimmed.slice('<thinking>'.length);
+      updateThinkingCard(thinkingEl, thinkingText);
+    } else if (afterTrimmed.startsWith('<')) {
+      enterDiscard(afterTrimmed);
+    } else if (/^(Case [A-D]|Where |Target:|Plan:|Q[123]\.|Note:|Step )/.test(afterTrimmed)) {
+      enterDiscard(afterTrimmed);
+    } else {
+      startAnswer(afterTrimmed);
     }
-    if (after.startsWith('<') || /^(Case [A-D]|Where |Target:|Plan:|Q[123]\.|Note:|Step )/.test(after)) {
-      discarding = true; prebuf = after.slice(-12);
-      return;
-    }
-    startAnswer(after);
   }
 
   try {
@@ -499,14 +459,14 @@ async function sse(url, payload) {
 
     const reader  = resp.body.getReader();
     const decoder = new TextDecoder();
-    let   rawBuf  = '';
+    let   buf     = '';
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      rawBuf += decoder.decode(value, { stream: true });
-      const lines = rawBuf.split('\n');
-      rawBuf = lines.pop();
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
 
       for (const line of lines) {
         if (!line.startsWith('data: ')) continue;
@@ -515,12 +475,13 @@ async function sse(url, payload) {
         let ev; try { ev = JSON.parse(raw); } catch { continue; }
         const t = ev.type || '';
 
-        // ── Events ────────────────────────────────────────────────────────
         if (t === 'tool_start') {
-          // Update spinner label — don't remove it
-          if (statusEl && statusEl.parentNode) {
-            statusEl.querySelector('span:last-child').textContent = 'Analysing…';
+          if (toolEls.length === 1 && toolEls[0].classList.contains('thinking')) {
+            const r = toolEls[0]._row || toolEls[0].closest('.row');
+            if (r) r.remove(); else toolEls[0].remove();
+            toolEls = [];
           }
+          toolEls.push(addToolStep(toolLabel(ev.name), true));
           toolActive = true;
           if (started && agentEl) {
             const row = agentEl.closest('.row');
@@ -532,41 +493,45 @@ async function sse(url, payload) {
         }
 
         if (t === 'tool_end') {
-          toolActive    = false;
+          const active = toolEls.filter(el => !el.classList.contains('done'));
+          if (active.length > 0) markDone(active[active.length-1], toolLabel(ev.name));
+          toolActive = false;
           lastAnswerBuf = '';
           continue;
         }
 
         if (t === 'interrupt') {
-          removeStatus();
+          toolEls.filter(el => !el.classList.contains('done'))
+            .forEach(el => markDone(el, 'Clarification needed'));
+          toolEls = [];
           lastAnswerBuf = '';
-          prebuf        = '';
+          thinkingText  = '';
           if (agentEl) {
             const row = agentEl.closest('.row');
             if (row) row.remove();
             agentEl = null; started = false; content = '';
           }
           addHITL(ev.question || 'Please clarify:', ev.options || [], ev.allow_freetext !== false);
-          // Add "Clarification needed" indicator
-          const cl = addToolStep('Clarification needed', false);
-          cl.classList.add('done');
           interrupted = true; streaming = false; setDisabled(false); return;
         }
 
         if (t === 'chart') {
+          toolEls.filter(el => !el.classList.contains('done'))
+            .forEach(el => markDone(el, 'Chart ready'));
+          toolEls = [];
           addChart(ev.config);
           readyForAnswer = true;
           lastAnswerBuf  = '';
-          prebuf         = '';
-          if (!inThinking) discarding = false;
-          // Add "Chart ready" indicator
-          const cr = addToolStep('Chart ready', false);
-          cr.classList.add('done');
+          if (!inThinking) { discarding = false; thinkingText = ''; }
           continue;
         }
 
         if (t === 'error') {
-          removeStatus();
+          toolEls.forEach(el => {
+            const r = el._row || el.closest('.row');
+            if (r) r.remove(); else el.remove();
+          });
+          toolEls = [];
           addErr(ev.message || 'Unknown error');
           break;
         }
@@ -574,24 +539,34 @@ async function sse(url, payload) {
         if (t === 'done') {
           latency = ev.latency_ms || 0;
           if (!started && !inThinking) {
-            const answer = (prebuf.trim() && !discarding) ? prebuf.trim() : lastAnswerBuf.trim();
-            if (answer) startAnswer(answer);
+            const plain    = thinkingText.trim();
+            const fallback = lastAnswerBuf.trim();
+            const answer   = (plain && !discarding) ? plain : fallback;
+            if (answer) {
+              toolEls.filter(el => !el.classList.contains('done')).forEach(el => markDone(el, 'Done'));
+              toolEls = [];
+              agentEl  = addAgentBubble();
+              started  = true;
+              content += answer;
+              streamToken(agentEl, content);
+            }
           }
-          if (inThinking && cardEl) sealThinkingBlock();
+          if (inThinking && thinkingEl) {
+            sealThinkingCard(thinkingEl);
+            inThinking = false;
+          }
           continue;
         }
 
-        // ── Token ─────────────────────────────────────────────────────────
         const token = ev.content || ev.result || ev.token || '';
         if (!token) continue;
 
-        // Base64 image from chart agent
         if (token.includes('data:image/') && token.includes('base64,')) {
           if (!agentEl) { agentEl = addAgentBubble(); started = true; }
           const wrap = document.createElement('div');
           wrap.style.cssText = 'margin:12px 0;max-width:100%';
-          const img  = document.createElement('img');
-          const b64  = token.match(/data:image\/[^;]+;base64,[A-Za-z0-9+\/=]+/);
+          const img = document.createElement('img');
+          const b64 = token.match(/data:image\/[^;]+;base64,[A-Za-z0-9+\/=]+/);
           if (b64) img.src = b64[0];
           img.style.cssText = 'max-width:100%;border-radius:8px;border:1px solid var(--border)';
           img.alt = 'Chart';
@@ -601,90 +576,93 @@ async function sse(url, payload) {
           continue;
         }
 
-        // ── THINKING state ────────────────────────────────────────────────
+        // THINKING state
         if (inThinking) {
-          blockBuf += token;
-          if (!blockBuf.includes('</thinking>')) {
-            appendThinking('');   // re-render display (blockBuf already updated)
+          thinkingText += token;
+          if (!thinkingText.includes('</thinking>')) {
+            const display = thinkingText.replace(/<\/?t(h(i(n(k(i(n(g?)?)?)?)?)?)?)?>?$/i, '');
+            updateThinkingCard(thinkingEl, display);
             continue;
           }
-          const [blk, ...tail] = blockBuf.split('</thinking>');
-          blockBuf = blk;
-          sealThinkingBlock();
+          const parts  = thinkingText.split('</thinking>');
+          thinkingText = parts[0];
+          updateThinkingCard(thinkingEl, thinkingText);
+          sealThinkingCard(thinkingEl);
+          inThinking    = false;
           lastAnswerBuf = '';
-          handleAfterThinking(tail.join('</thinking>'));
+          handleAfterThinking(parts.slice(1).join('</thinking>'));
           continue;
         }
 
-        // Discard tokens during tool execution (AFTER inThinking check)
         if (toolActive) { lastAnswerBuf += token; continue; }
 
-        // ── ANSWER state ──────────────────────────────────────────────────
-        if (started) {
-          content += token;
-          streamToken(agentEl, content);
-          continue;
+        // ANSWER state
+        if (started) { content += token; streamToken(agentEl, content); continue; }
+
+        // PREBUF state
+        if (toolEls.length === 1 && toolEls[0].classList.contains('thinking')) {
+          const r = toolEls[0]._row || toolEls[0].closest('.row');
+          if (r) r.remove(); else toolEls[0].remove();
+          toolEls = [];
         }
 
-        // ── PREBUF state ──────────────────────────────────────────────────
-        // readyForAnswer: chart fired, waiting for next thinking or answer
         if (readyForAnswer) {
-          prebuf += token;
-          if (prebuf.includes('<thinking>')) {
+          thinkingText += token;
+          if (thinkingText.includes('<thinking>')) {
             readyForAnswer = false;
-            const [, ...rest] = prebuf.split('<thinking>');
-            openThinkingBlock();
-            const blockStart = rest.join('<thinking>');
-            prebuf = '';
-            if (blockStart.includes('</thinking>')) {
-              const [blk, ...tail] = blockStart.split('</thinking>');
-              blockBuf = blk;
-              sealThinkingBlock();
-              lastAnswerBuf = '';
-              handleAfterThinking(tail.join('</thinking>'));
+            inThinking     = true;
+            if (!thinkingEl) {
+              thinkingEl = addThinkingCard();
             } else {
-              appendThinking(blockStart);
+              reopenThinkingCard(thinkingEl);
+              thinkingText = thinkingText + '\n\n—\n\n';
             }
-          } else if (!prebuf.trimStart().startsWith('<') || prebuf.length > 30) {
+            thinkingText = thinkingText.split('<thinking>').slice(-1)[0];
+            updateThinkingCard(thinkingEl, thinkingText);
+            if (thinkingText.includes('</thinking>')) {
+              const parts  = thinkingText.split('</thinking>');
+              thinkingText = parts[0];
+              updateThinkingCard(thinkingEl, thinkingText);
+              sealThinkingCard(thinkingEl);
+              inThinking = false; lastAnswerBuf = '';
+              handleAfterThinking(parts.slice(1).join('</thinking>'));
+            }
+          } else if (!thinkingText.trimStart().startsWith('<') || thinkingText.length > 30) {
             readyForAnswer = false;
-            startAnswer(prebuf);
-            prebuf = '';
+            startAnswer(thinkingText);
+            thinkingText = '';
           }
           continue;
         }
 
-        prebuf += token;
+        thinkingText += token;
 
-        // Detect <thinking> open tag
-        if (prebuf.includes('<thinking>')) {
-          discarding = false;
-          const [, ...rest] = prebuf.split('<thinking>');
-          openThinkingBlock();
-          const blockStart = rest.join('<thinking>');
-          prebuf = '';
-          if (blockStart.includes('</thinking>')) {
-            const [blk, ...tail] = blockStart.split('</thinking>');
-            blockBuf = blk;
-            sealThinkingBlock();
-            lastAnswerBuf = '';
-            handleAfterThinking(tail.join('</thinking>'));
-          } else {
-            appendThinking(blockStart);
+        if (thinkingText.includes('<thinking>')) {
+          discarding   = false;
+          inThinking   = true;
+          if (!thinkingEl) thinkingEl = addThinkingCard();
+          thinkingText = thinkingText.split('<thinking>').slice(1).join('<thinking>');
+          updateThinkingCard(thinkingEl, thinkingText);
+          if (thinkingText.includes('</thinking>')) {
+            const parts  = thinkingText.split('</thinking>');
+            thinkingText = parts[0];
+            updateThinkingCard(thinkingEl, thinkingText);
+            sealThinkingCard(thinkingEl);
+            thinkingEl = null; inThinking = false;
+            toolEls.filter(el => !el.classList.contains('done')).forEach(el => markDone(el, 'Done'));
+            toolEls = []; lastAnswerBuf = '';
+            handleAfterThinking(parts.slice(1).join('</thinking>'));
           }
           continue;
         }
 
         if (discarding) {
-          prebuf = prebuf.slice(-12);
+          if (thinkingText.length > 12) thinkingText = thinkingText.slice(-12);
           lastAnswerBuf += token;
           continue;
         }
 
-        // Plain answer accumulating (resume flow, short direct responses)
-        if (prebuf.length > 500) {
-          startAnswer(prebuf);
-          prebuf = '';
-        }
+        if (thinkingText.length > 500) { startAnswer(thinkingText); thinkingText = ''; }
       }
     }
 
@@ -692,14 +670,16 @@ async function sse(url, payload) {
       const cleaned = clean(content);
       if (!cleaned) addErr('Response could not be displayed — try + New for a fresh session.');
       else finalize(agentEl, cleaned, latency);
-    } else if (!started && !interrupted) {
-      addErr('No response received.');
-    }
+    } else if (!started && !interrupted) addErr('No response received.');
 
   } catch (e) {
     addErr('Connection error: ' + e.message);
   } finally {
-    removeStatus();
+    toolEls.forEach(el => {
+      const r = el._row || el.closest('.row');
+      if (r && r.parentNode) r.remove(); else if (el.parentNode) el.remove();
+    });
+    toolEls = [];
     streaming = false;
     setDisabled(false);
     scrollEnd();
@@ -733,6 +713,7 @@ function newChat() {
     '<div class="starters-label">Try one of these</div>' +
     '<div class="starters" id="starters"></div>';
   document.getElementById('msgs').appendChild(w);
+  _chartCount = 0;
   const startersEl2 = document.getElementById('starters');
   STARTERS.forEach(q => {
     const b = document.createElement('button');
@@ -777,21 +758,29 @@ function finalize(el, cleaned, latency_ms) {
 
 function addToolStep(label, active) {
   const m   = document.getElementById('msgs');
+  const row = document.createElement('div');
+  row.className = 'row';
+  const av  = document.createElement('div');
+  av.className = 'av av-ai'; av.textContent = 'AI';
   const el  = document.createElement('div');
   el.className = 'tool-step' + (active ? ' thinking' : '');
   el.innerHTML = (active
     ? '<span class="spin"></span>'
     : '<span class="num">✓</span>') + '<span>' + esc(label) + '</span>';
-  m.appendChild(el); scrollEnd();
+  row.appendChild(av); row.appendChild(el);
+  m.appendChild(row); scrollEnd();
+  // Return el so callers can manipulate the step, expose row for removal
+  el._row = row;
   return el;
 }
 
 function markDone(el, label) {
   if (!el) return;
-  // Hide generic analysis steps — only keep chart/clarification visible
   const keep = label === 'Chart ready' || label === 'Clarification needed';
   if (!keep) {
-    el.remove();
+    // Remove the wrapping row if exists, else just the element
+    const row = el._row || el.closest('.row');
+    if (row) row.remove(); else el.remove();
     return;
   }
   el.classList.add('done');
@@ -800,16 +789,25 @@ function markDone(el, label) {
 }
 
 function addErr(msg) {
-  const m  = document.getElementById('msgs');
-  const el = document.createElement('div');
+  const m   = document.getElementById('msgs');
+  const row = document.createElement('div');
+  row.className = 'row';
+  const av  = document.createElement('div');
+  av.className = 'av av-ai'; av.textContent = 'AI';
+  const el  = document.createElement('div');
   el.className = 'err';
   el.textContent = '⚠ ' + msg;
-  m.appendChild(el); scrollEnd();
+  row.appendChild(av); row.appendChild(el);
+  m.appendChild(row); scrollEnd();
 }
 
 function addHITL(question, options, allowFreetext) {
-  const m  = document.getElementById('msgs');
-  const el = document.createElement('div');
+  const m   = document.getElementById('msgs');
+  const row = document.createElement('div');
+  row.className = 'row';
+  const av  = document.createElement('div');
+  av.className = 'av av-ai'; av.textContent = 'AI';
+  const el  = document.createElement('div');
   el.className = 'hitl-card';
   let html = '<div class="hitl-tag">CLARIFICATION NEEDED</div>';
   html += '<p class="hitl-q">' + esc(question) + '</p>';
@@ -823,7 +821,8 @@ function addHITL(question, options, allowFreetext) {
     html += '<p class="hitl-free">Or type your answer below</p>';
   }
   el.innerHTML = html;
-  m.appendChild(el); scrollEnd();
+  row.appendChild(av); row.appendChild(el);
+  m.appendChild(row); scrollEnd();
 }
 
 function chooseHITL(btn, opt) {
@@ -894,7 +893,11 @@ function mdParse(t) {
 
 // ── Thinking card ────────────────────────────────────────────────────────
 function addThinkingCard() {
-  const m = document.getElementById('msgs');
+  const m   = document.getElementById('msgs');
+  const row = document.createElement('div');
+  row.className = 'row';
+  const av  = document.createElement('div');
+  av.className = 'av av-ai'; av.textContent = 'AI';
   const wrap = document.createElement('div');
   wrap.className = 'thinking-wrap';
   wrap.innerHTML =
@@ -902,7 +905,8 @@ function addThinkingCard() {
     '<span class="arr">▶</span><span>Reasoning</span><span class="live-dot"></span>' +
     '</button>' +
     '<div class="thinking-body"></div>';
-  m.appendChild(wrap); scrollEnd();
+  row.appendChild(av); row.appendChild(wrap);
+  m.appendChild(row); scrollEnd();
   return wrap;
 }
 function updateThinkingCard(wrap, text) {
@@ -944,12 +948,17 @@ function toggleThinking(btn) {
 let _chartCount = 0;
 function addChart(config) {
   if (!config) return;
-  const m = document.getElementById('msgs');
+  const m   = document.getElementById('msgs');
+  const row = document.createElement('div');
+  row.className = 'row';
+  const av  = document.createElement('div');
+  av.className = 'av av-ai'; av.textContent = 'AI';
   const wrap = document.createElement('div');
   wrap.className = 'chart-wrap';
   const id = 'chart-' + (++_chartCount);
   wrap.innerHTML = '<canvas id="' + id + '"></canvas>';
-  m.appendChild(wrap);
+  row.appendChild(av); row.appendChild(wrap);
+  m.appendChild(row);
   scrollEnd();
 
   // Chart.js v4 compat: "horizontalBar" was removed — use bar + indexAxis:'y'
@@ -1000,11 +1009,18 @@ function clean(t) {
   // Strip attachment:// image placeholders from chart agent
   t = t.replace(/!\[[^\]]*\]\(attachment:\/\/[^)]*\)/g, '').trim();
   t = t.replace(/\(attachment:\/\/[^)]*\)/g, '').trim();
-  // Strip any <thinking>...</thinking> blocks that leaked into final answer
+  // Strip <thinking>...</thinking> blocks — server strips these but UI
+  // is a safety net for any edge cases (split tags, partial blocks etc.)
+  // Run twice: second pass catches nested/adjacent blocks left by first pass
   t = t.replace(/<thinking>[\s\S]*?<\/thinking>/g, '');
-  // Strip any orphaned/partial thinking tags that survived the block stripper
-  t = t.replace(/<\/thinking>/g, '');
-  t = t.replace(/<thinking>/g, '');
+  t = t.replace(/<thinking>[\s\S]*?<\/thinking>/g, '');
+  // Strip orphaned tags — open tag with no close, or close with no open
+  t = t.replace(/<thinking>[^<]*/gi, '');
+  t = t.replace(/<\/thinking>/gi, '');
+  // Strip Case/Plan/Note lines that leak from thinking content
+  t = t.replace(/^(Case [A-D][:\s]|Plan:|Note:|Step \d+:|Q[1-3]\.|Target:|Where |Sub-task:)[^\n]*/gm, '');
+  // Strip lines that are clearly internal agent reasoning
+  t = t.replace(/^(Relevance [✓✗]|Evidence [✓✗]|Completeness [✓✗]|Faithfulness [✓✗])[^\n]*/gm, '');
   // Strip Chart.js placeholder text in all forms the LLM emits:
   // ![Chart.js visualisation rendered by chart_tool]
   // [Interactive Chart.js visualisation]
