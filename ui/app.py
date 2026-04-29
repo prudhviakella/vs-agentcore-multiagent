@@ -14,7 +14,7 @@ import logging
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, StreamingResponse, Response
+from fastapi.responses import HTMLResponse, StreamingResponse, Response, JSONResponse
 
 log = logging.getLogger(__name__)
 
@@ -80,6 +80,34 @@ async def health():
 @app.get("/healthz")
 async def healthz():
     return {"status": "ok"}
+
+
+@app.post("/feedback")
+async def feedback(request: Request):
+    """
+    Proxy feedback from browser → Platform API.
+
+    The UI never touches AWS directly. The Platform API has the
+    DynamoDB credentials and owns the traces table.
+
+    Payload:
+        run_id  : str — unique request ID from the done event
+        rating  : str — "positive" or "negative"
+        reason  : str — reason chip selected (negative only)
+        comment : str — free text (negative only)
+    """
+    body = await request.json()
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                f"{API_URL}/api/v1/{AGENT}/feedback",
+                headers = HEADERS,
+                json    = body,
+            )
+        return JSONResponse(resp.json(), status_code=resp.status_code)
+    except Exception as e:
+        log.exception(f"[Feedback] Proxy failed: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 # Minimal favicon to silence 404 in browser console
@@ -244,6 +272,33 @@ textarea::placeholder{color:var(--text-3)}
 .tool-step.done .num{color:var(--text-2)}
 /* ── meta footer ── */
 .meta{display:flex;gap:12px;font-size:11px;color:var(--text-3,#4a6a8a);margin-top:10px;padding-top:8px;border-top:1px solid var(--border)}
+
+/* ── feedback ── */
+.feedback-row{display:flex;align-items:center;gap:8px;margin-top:10px;padding-top:8px;border-top:1px solid var(--border)}
+.feedback-label{font-size:11px;color:var(--text-3);letter-spacing:.02em}
+.thumb{background:none;border:1px solid var(--border);border-radius:6px;padding:4px 9px;cursor:pointer;font-size:13px;color:var(--text-2);transition:all .14s;line-height:1}
+.thumb:hover{border-color:var(--border-2);color:var(--text);transform:scale(1.1)}
+.thumb.active-up{border-color:var(--green);background:rgba(0,229,160,.08);color:var(--green)}
+.thumb.active-down{border-color:var(--red);background:rgba(255,77,106,.08);color:var(--red)}
+.thumb:disabled{opacity:.4;cursor:not-allowed;transform:none}
+.feedback-thanks{font-size:11px;color:var(--green);letter-spacing:.02em}
+
+/* thumbs-down form */
+.fb-form{margin-top:10px;background:var(--surface);border:1px solid var(--border);border-top:2px solid var(--red);border-radius:var(--r-lg);padding:16px;animation:fadeUp .18s ease}
+.fb-form-title{font-size:12px;font-weight:500;color:var(--text);margin-bottom:10px}
+.fb-chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
+.fb-chip{background:var(--surface-2);border:1px solid var(--border);border-radius:20px;padding:5px 12px;font-size:12px;font-weight:300;color:var(--text-2);cursor:pointer;font-family:var(--font);transition:all .14s}
+.fb-chip:hover{border-color:var(--red);color:var(--text)}
+.fb-chip.selected{border-color:var(--red);background:rgba(255,77,106,.08);color:var(--red)}
+.fb-textarea{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:var(--r);color:var(--text);font-family:var(--font);font-size:13px;font-weight:300;padding:9px 12px;resize:none;outline:none;margin-bottom:10px;line-height:1.5}
+.fb-textarea:focus{border-color:var(--border-2)}
+.fb-textarea::placeholder{color:var(--text-3)}
+.fb-actions{display:flex;gap:8px;justify-content:flex-end}
+.fb-cancel{background:none;border:1px solid var(--border);border-radius:var(--r);padding:6px 14px;font-size:12px;font-family:var(--font);color:var(--text-2);cursor:pointer;transition:all .14s}
+.fb-cancel:hover{border-color:var(--border-2);color:var(--text)}
+.fb-submit{background:var(--red);border:none;border-radius:var(--r);padding:6px 14px;font-size:12px;font-family:var(--font);color:var(--white,#fff);cursor:pointer;transition:all .14s;opacity:.5}
+.fb-submit.ready{opacity:1}
+.fb-submit:hover.ready{background:#ff6b82}
 </style>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 </head>
@@ -402,6 +457,8 @@ async function sse(url, payload) {
   let content        = '';
   let latency        = 0;
   let started        = false;
+  let errored        = false;
+  let currentRunId   = threadId;  // fallback to thread_id; overridden by done event
   let inThinking     = false;
   let thinkingText   = '';
   let thinkingEl     = null;
@@ -484,6 +541,7 @@ async function sse(url, payload) {
       } catch {
         addErr(`Request failed (HTTP ${resp.status})`);
       }
+      errored = true;
       return;
     }
 
@@ -563,11 +621,13 @@ async function sse(url, payload) {
           });
           toolEls = [];
           addErr(ev.message || 'Unknown error');
+          errored = true;
           break;
         }
 
         if (t === 'done') {
           latency = ev.latency_ms || 0;
+          if (ev.run_id) currentRunId = ev.run_id;
           if (!started && !inThinking) {
             const plain    = thinkingText.trim();
             const fallback = lastAnswerBuf.trim();
@@ -700,7 +760,22 @@ async function sse(url, payload) {
       const cleaned = clean(content);
       if (!cleaned) addErr('Response could not be displayed — try + New for a fresh session.');
       else finalize(agentEl, cleaned, latency);
-    } else if (!started && !interrupted) addErr('No response received.');
+    } else if (!started && !interrupted && !errored) addErr('No response received.');
+
+    // Always add feedback row after any complete AI response (text or chart).
+    // addFeedback was previously only called inside the started&&agentEl branch,
+    // so chart-only responses never got thumbs. Fix: append feedback to the
+    // last AI row in the message list after the stream completes.
+    if (!interrupted && !errored) {
+      const msgs   = document.getElementById('msgs');
+      const rows   = msgs.querySelectorAll('.row:not(.row-user)');
+      const target = rows.length > 0 ? rows[rows.length - 1] : null;
+      if (target) {
+        // Use existing agentEl if available, otherwise attach to the last AI row
+        const el = (agentEl && agentEl.isConnected) ? agentEl : target.querySelector('.agent-bubble, .chart-wrap, .tool-step');
+        if (el) addFeedback(el, currentRunId);
+      }
+    }
 
   } catch (e) {
     addErr('Connection error: ' + e.message);
@@ -1092,7 +1167,120 @@ function clean(t) {
 function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
-function escA(s) { return String(s).replace(/'/g, "\\'"); }
+function escA(s) { return String(s).replace(/'/g, "\'"); }
+
+// ── Feedback ──────────────────────────────────────────────────────────────
+const FB_REASONS = [
+  'Wrong answer',
+  'Hallucination / made-up data',
+  'Missing information',
+  'Off-topic response',
+  'Too slow',
+  'Other',
+];
+
+function addFeedback(agentEl, runId) {
+  const row = document.createElement('div');
+  row.className = 'feedback-row';
+  row.dataset.runId = runId;
+  row.innerHTML =
+    '<span class="feedback-label">Was this helpful?</span>' +
+    '<button class="thumb" onclick="handleThumb(this,\'positive\')" title="Helpful">\ud83d\udc4d</button>' +
+    '<button class="thumb" onclick="handleThumb(this,\'negative\')" title="Not helpful">\ud83d\udc4e</button>';
+  agentEl.appendChild(row);
+}
+
+function handleThumb(btn, rating) {
+  const row   = btn.closest('.feedback-row');
+  const runId = row.dataset.runId;
+  row.querySelectorAll('.thumb').forEach(function(b){ b.disabled = true; });
+  if (rating === 'positive') {
+    btn.classList.add('active-up');
+    _submitFeedback(runId, 'positive', '', '');
+    setTimeout(function(){
+      row.innerHTML = '<span class="feedback-thanks">\u2713 Thanks for the feedback!</span>';
+    }, 300);
+  } else {
+    btn.classList.add('active-down');
+    _showFeedbackForm(row, runId);
+  }
+}
+
+function _showFeedbackForm(feedbackRow, runId) {
+  var existing = document.getElementById('fb-form-' + runId);
+  if (existing) existing.remove();
+  var form = document.createElement('div');
+  form.className = 'fb-form';
+  form.id = 'fb-form-' + runId;
+  var chipsHtml = FB_REASONS.map(function(r){
+    return '<button class="fb-chip" onclick="_selectChip(this)">' + esc(r) + '</button>';
+  }).join('');
+  form.innerHTML =
+    '<div class="fb-form-title">What went wrong? <span style="font-weight:300;color:var(--text-2)">(select one)</span></div>' +
+    '<div class="fb-chips">' + chipsHtml + '</div>' +
+    '<textarea class="fb-textarea" id="fb-text-' + runId + '" rows="2" ' +
+    'placeholder="Optional: add more detail\u2026" oninput="_checkSubmit(\'' + runId + '\')"></textarea>' +
+    '<div class="fb-actions">' +
+    '<button class="fb-cancel" onclick="_cancelFeedback(\'' + runId + '\')">Cancel</button>' +
+    '<button class="fb-submit" id="fb-submit-' + runId + '" onclick="_doSubmitFeedback(\'' + runId + '\')" disabled>Send</button>' +
+    '</div>';
+  feedbackRow.insertAdjacentElement('afterend', form);
+  scrollEnd();
+}
+
+function _selectChip(chip) {
+  chip.closest('.fb-chips').querySelectorAll('.fb-chip').forEach(function(c){ c.classList.remove('selected'); });
+  chip.classList.add('selected');
+  var runId = chip.closest('.fb-form').id.replace('fb-form-', '');
+  _checkSubmit(runId);
+}
+
+function _checkSubmit(runId) {
+  var form     = document.getElementById('fb-form-' + runId);
+  var hasChip  = form.querySelector('.fb-chip.selected');
+  var textEl   = document.getElementById('fb-text-' + runId);
+  var hasText  = textEl && textEl.value.trim().length > 0;
+  var btn      = document.getElementById('fb-submit-' + runId);
+  // Enable Send when either a chip is selected OR free text has been entered
+  if (hasChip || hasText) {
+    btn.classList.add('ready');
+    btn.disabled = false;
+  } else {
+    btn.classList.remove('ready');
+    btn.disabled = true;
+  }
+}
+
+function _doSubmitFeedback(runId) {
+  var form    = document.getElementById('fb-form-' + runId);
+  var chip    = form.querySelector('.fb-chip.selected');
+  var reason  = chip ? chip.textContent : '';
+  var textEl  = document.getElementById('fb-text-' + runId);
+  var comment = textEl ? textEl.value : '';
+  _submitFeedback(runId, 'negative', reason, comment);
+  form.remove();
+  var row = document.querySelector('[data-run-id="' + runId + '"]');
+  if (row) row.innerHTML = '<span class="feedback-thanks">\u2713 Thanks \u2014 feedback recorded.</span>';
+}
+
+function _cancelFeedback(runId) {
+  var form = document.getElementById('fb-form-' + runId);
+  if (form) form.remove();
+  var row = document.querySelector('[data-run-id="' + runId + '"]');
+  if (row) row.querySelectorAll('.thumb').forEach(function(b){ b.disabled = false; });
+}
+
+async function _submitFeedback(runId, rating, reason, comment) {
+  try {
+    await fetch('/feedback', {
+      method:  'POST',
+      headers: {'Content-Type': 'application/json'},
+      body:    JSON.stringify({run_id: runId, rating: rating, reason: reason, comment: comment}),
+    });
+  } catch(e) {
+    console.warn('Feedback submit failed:', e);
+  }
+}
 </script>
 </body>
 </html>"""

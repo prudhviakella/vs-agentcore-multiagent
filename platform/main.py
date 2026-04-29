@@ -100,18 +100,15 @@ def _sse(data: dict) -> str:
     return f"data: {json.dumps(data)}\n\n"
 
 
-# ── Local streaming (HTTP to localhost supervisor) ────────────────────────
+# ── Local streaming ───────────────────────────────────────────────────────
 async def _stream_local(payload: dict, request_id: str):
     t0  = time.perf_counter()
     url = f"{SUPERVISOR_URL}/invocations"
-    log.info(f"[PLATFORM] → Supervisor (local)  request_id={request_id}  thread={payload.get('thread_id')}")
+    log.info(f"[PLATFORM] → Supervisor (local)  request_id={request_id}")
     try:
         async with httpx.AsyncClient(timeout=180.0) as client:
-            async with client.stream(
-                "POST", url,
-                json    = payload,
-                headers = {"Content-Type": "application/json"},
-            ) as response:
+            async with client.stream("POST", url, json=payload,
+                                     headers={"Content-Type": "application/json"}) as response:
                 async for line in response.aiter_lines():
                     line = line.strip()
                     if not line:
@@ -125,91 +122,62 @@ async def _stream_local(payload: dict, request_id: str):
                         except json.JSONDecodeError:
                             continue
     except Exception as exc:
-        elapsed = round((time.perf_counter() - t0) * 1_000, 2)
-        log.error(f"[PLATFORM] Stream error  request_id={request_id}  elapsed_ms={elapsed}  error={exc}")
         yield _sse({"type": "error", "message": str(exc)})
 
 
-# ── Production streaming (AgentCore runtime via AWS SDK) ──────────────────
+# ── Production streaming ──────────────────────────────────────────────────
 async def _stream_agentcore(payload: dict, request_id: str):
-    """
-    Invoke AgentCore Runtime via boto3 in a thread pool.
-    Uses asyncio.Queue to pipe chunks from thread to async generator
-    so the event loop is never blocked and the client sees tokens in real time.
-    """
     t0    = time.perf_counter()
     queue = asyncio.Queue()
-    loop  = asyncio.get_running_loop()  # get_event_loop() is deprecated in 3.10+
+    loop  = asyncio.get_running_loop()
 
     def _stream_to_queue():
         try:
             agent_arn = _get_agent_runtime_arn()
-            # Set read_timeout=300 — default 60s causes ReadTimeoutError
-            # for complex queries that take 90-120s to complete
             from botocore.config import Config
-            client    = boto3.client(
-                "bedrock-agentcore",
-                region_name = REGION,
-                config      = Config(
-                    read_timeout    = 300,   # 5 min — matches ALB idle timeout
-                    connect_timeout = 10,
-                    retries         = {"max_attempts": 0},  # no retries on streaming
-                ),
+            client = boto3.client(
+                "bedrock-agentcore", region_name=REGION,
+                config=Config(read_timeout=300, connect_timeout=10,
+                              retries={"max_attempts": 0}),
             )
-
-            log.info(
-                f"[PLATFORM] → Supervisor (AgentCore)"
-                f"  request_id={request_id}"
-                f"  thread={payload.get('thread_id')}"
-                f"  resume={payload.get('resume', False)}"
-            )
-
+            log.info(f"[PLATFORM] → AgentCore  request_id={request_id}  thread={payload.get('thread_id')}")
             response = client.invoke_agent_runtime(
                 agentRuntimeArn  = agent_arn,
                 runtimeSessionId = payload["thread_id"],
                 payload          = json.dumps(payload).encode("utf-8"),
             )
-
             streaming_body = response.get("response")
             if streaming_body:
-                # Use 64KB chunks — chart config JSON can exceed 1KB causing
-                # UTF-8 decode errors when a multi-byte char splits across chunks.
-                # Also accumulate partial lines across chunks.
                 _partial = b""
                 for chunk in streaming_body.iter_chunks(chunk_size=65536):
                     if chunk:
                         _partial += chunk
-                        # Only send complete lines (ending with \n)
                         if b"\n" in _partial:
-                            last_nl = _partial.rfind(b"\n")
+                            last_nl  = _partial.rfind(b"\n")
                             complete = _partial[:last_nl + 1]
                             _partial = _partial[last_nl + 1:]
                             loop.call_soon_threadsafe(queue.put_nowait, complete)
-                # Flush any remaining partial data
                 if _partial:
                     loop.call_soon_threadsafe(queue.put_nowait, _partial)
             else:
                 raw = response.get("body", b"")
                 if raw:
                     loop.call_soon_threadsafe(queue.put_nowait, raw)
-
         except Exception as exc:
-            log.error(f"[PLATFORM] AgentCore invoke error: {exc}")
+            log.error(f"[PLATFORM] AgentCore error: {exc}")
             err = _sse({"type": "error", "message": str(exc)}).encode()
             loop.call_soon_threadsafe(queue.put_nowait, err)
         finally:
-            loop.call_soon_threadsafe(queue.put_nowait, None)  # sentinel
+            loop.call_soon_threadsafe(queue.put_nowait, None)
 
     loop.run_in_executor(_executor, _stream_to_queue)
 
     try:
         while True:
             try:
-                # Wait max 10s for next chunk — send keepalive comment if nothing arrives
-                # This prevents ALB from closing idle SSE connections during long tool calls
                 chunk = await asyncio.wait_for(queue.get(), timeout=10.0)
             except asyncio.TimeoutError:
-                yield ": keepalive\n\n"  # SSE comment — ignored by client, resets ALB idle timer
+                yield ": keepalive\n\n"
                 continue
             if chunk is None:
                 break
@@ -227,13 +195,10 @@ async def _stream_agentcore(payload: dict, request_id: str):
                     except json.JSONDecodeError:
                         continue
     except Exception as exc:
-        elapsed = round((time.perf_counter() - t0) * 1_000, 2)
-        log.error(f"[PLATFORM] Stream error  request_id={request_id}  elapsed_ms={elapsed}  error={exc}")
         yield _sse({"type": "error", "message": str(exc)})
 
 
 def _stream(payload: dict, request_id: str):
-    """Route to local HTTP or AgentCore based on LOCAL_MODE."""
     if LOCAL_MODE:
         return _stream_local(payload, request_id)
     return _stream_agentcore(payload, request_id)
@@ -243,104 +208,116 @@ def _stream(payload: dict, request_id: str):
 
 @app.get("/health")
 async def health():
-    return {
-        "status":     "ok",
-        "service":    "vs-agentcore-platform",
-        "mode":       "local" if LOCAL_MODE else "aws",
-        "supervisor": SUPERVISOR_URL if LOCAL_MODE else "AgentCore",
-    }
+    return {"status": "ok", "mode": "local" if LOCAL_MODE else "aws"}
+
 
 @app.get("/")
 async def root():
     ui_path = os.path.join(static_dir, "index.html")
     if os.path.exists(ui_path):
         return FileResponse(ui_path)
-    return {"message": "VS AgentCore Platform — UI not found in static/"}
+    return {"message": "VS AgentCore Platform"}
+
 
 @app.post(f"/api/v1/{AGENT}/chat")
-async def chat(
-    body:    ChatRequest,
-    request: Request,
-    _:       str = Depends(verify_api_key),
-):
+async def chat(body: ChatRequest, request: Request, _: str = Depends(verify_api_key)):
     request_id = str(uuid.uuid4())[:8]
     user_id    = getattr(request.state, "user_id", "anonymous")
-
     if not rate_limiter.allow(user_id):
         raise HTTPException(status_code=429, detail="Rate limit exceeded.")
-
     blocked, block_reason = check_input_guardrail(body.message)
     if blocked:
-        log.warning(f"[PLATFORM] Input guardrail blocked  request_id={request_id}  reason={block_reason[:80]}")
+        log.warning(f"[PLATFORM] Guardrail blocked  request_id={request_id}")
         raise HTTPException(status_code=400, detail=block_reason)
+    payload = {"message": body.message, "thread_id": body.thread_id,
+                "domain": body.domain, "resume": False}
+    log.info(f"[PLATFORM] chat  request_id={request_id}  thread={body.thread_id}")
+    return StreamingResponse(_stream(payload, request_id), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                 "Connection": "keep-alive", "X-Request-Id": request_id})
 
-    payload = {
-        "message":   body.message,
-        "thread_id": body.thread_id,
-        "domain":    body.domain,
-        "resume":    False,
-    }
-
-    log.info(f"[PLATFORM] → Supervisor  request_id={request_id}  thread={body.thread_id}")
-
-    return StreamingResponse(
-        _stream(payload, request_id),
-        media_type = "text/event-stream",
-        headers    = {
-            "Cache-Control":     "no-cache",
-            "X-Accel-Buffering": "no",
-            "Connection":        "keep-alive",
-            "X-Request-Id":      request_id,
-        },
-    )
 
 @app.post(f"/api/v1/{AGENT}/resume")
-async def resume(
-    body:    ResumeRequest,
-    request: Request,
-    _:       str = Depends(verify_api_key),
-):
+async def resume(body: ResumeRequest, request: Request, _: str = Depends(verify_api_key)):
     request_id = str(uuid.uuid4())[:8]
     user_id    = getattr(request.state, "user_id", "anonymous")
-
     if not rate_limiter.allow(user_id):
         raise HTTPException(status_code=429, detail="Rate limit exceeded.")
+    payload = {"message": "", "thread_id": body.thread_id, "domain": body.domain,
+                "resume": True, "user_answer": body.user_answer}
+    return StreamingResponse(_stream(payload, request_id), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                 "Connection": "keep-alive", "X-Request-Id": request_id})
 
-    payload = {
-        "message":     "",
-        "thread_id":   body.thread_id,
-        "domain":      body.domain,
-        "resume":      True,
-        "user_answer": body.user_answer,
-    }
 
-    return StreamingResponse(
-        _stream(payload, request_id),
-        media_type = "text/event-stream",
-        headers    = {
-            "Cache-Control":     "no-cache",
-            "X-Accel-Buffering": "no",
-            "Connection":        "keep-alive",
-            "X-Request-Id":      request_id,
-        },
-    )
+# ── Feedback ──────────────────────────────────────────────────────────────
+
+@app.post(f"/api/v1/{AGENT}/feedback")
+async def record_feedback(request: Request, _: str = Depends(verify_api_key)):
+    """
+    Record thumbs up/down feedback on a supervisor trace item in DynamoDB.
+
+    The run_id is a unique UUID generated per handler() invocation in the
+    supervisor, emitted in the done SSE event, and captured by the UI.
+    Feedback is stored as additional attributes on the existing trace item.
+
+    Payload:
+        run_id  : str — unique request ID (DynamoDB partition key)
+        rating  : str — "positive" or "negative"
+        reason  : str — reason chip selected (negative only, optional)
+        comment : str — free text (negative only, optional)
+    """
+    body    = await request.json()
+    run_id  = body.get("run_id",  "")
+    rating  = body.get("rating",  "")
+    reason  = body.get("reason",  "")
+    comment = body.get("comment", "")
+
+    if not run_id or rating not in ("positive", "negative"):
+        raise HTTPException(status_code=400, detail="run_id and valid rating required")
+
+    try:
+        dynamo = boto3.resource("dynamodb", region_name=REGION)
+        table  = dynamo.Table(_get_trace_table_name())
+
+        update_expr = "SET feedback_rating = :r, feedback_ts = :ts"
+        expr_vals   = {":r": rating, ":ts": time.strftime("%Y-%m-%dT%H:%M:%SZ")}
+        if reason:
+            update_expr += ", feedback_reason = :reason"
+            expr_vals[":reason"] = reason
+        if comment:
+            update_expr += ", feedback_comment = :comment"
+            expr_vals[":comment"] = comment
+
+        table.update_item(
+            Key                       = {"run_id": run_id},
+            UpdateExpression          = update_expr,
+            ExpressionAttributeValues = expr_vals,
+        )
+        log.info(f"[PLATFORM] Feedback  run_id={run_id[:8]}  rating={rating}  reason={reason}")
+        return {"ok": True}
+
+    except Exception as exc:
+        log.error(f"[PLATFORM] Feedback failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
 
 # ── Observability ─────────────────────────────────────────────────────────
 
 def _flatten_decimals(obj):
     if isinstance(obj, Decimal):
         return float(obj) if "." in str(obj) else int(obj)
-    if isinstance(obj, list):
-        return [_flatten_decimals(i) for i in obj]
-    if isinstance(obj, dict):
-        return {k: _flatten_decimals(v) for k, v in obj.items()}
+    if isinstance(obj, list):  return [_flatten_decimals(i) for i in obj]
+    if isinstance(obj, dict):  return {k: _flatten_decimals(v) for k, v in obj.items()}
     return obj
+
 
 @lru_cache(maxsize=1)
 def _get_trace_table_name() -> str:
     return boto3.client("ssm", region_name=REGION).get_parameter(
         Name=f"{SSM_PREFIX}/dynamodb/trace_table_name"
     )["Parameter"]["Value"]
+
 
 @app.get("/observability", response_class=HTMLResponse)
 async def observability_dashboard():
@@ -349,13 +326,12 @@ async def observability_dashboard():
         with open(html_path) as f:
             html = f.read()
         api_key = _get_api_key()
-        html = html.replace(
-            "</head>",
-            f'<script>window.PLATFORM_API_KEY = "{api_key}";</script></head>'
-        )
+        html = html.replace("</head>",
+            f'<script>window.PLATFORM_API_KEY = "{api_key}";</script></head>')
         return HTMLResponse(content=html)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Dashboard HTML not found")
+
 
 @app.get(f"/api/v1/{AGENT}/traces")
 async def list_traces(limit: int = 200, _: str = Depends(verify_api_key)):
@@ -371,8 +347,8 @@ async def list_traces(limit: int = 200, _: str = Depends(verify_api_key)):
         items.sort(key=lambda x: float(x.get("ts", 0)), reverse=True)
         return items[:limit]
     except Exception as exc:
-        log.error(f"[PLATFORM] list_traces error: {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
+
 
 @app.get(f"/api/v1/{AGENT}/traces/{{thread_id}}")
 async def get_trace(thread_id: str, _: str = Depends(verify_api_key)):
@@ -381,9 +357,11 @@ async def get_trace(thread_id: str, _: str = Depends(verify_api_key)):
         dynamo = boto3.resource("dynamodb", region_name=REGION)
         table  = dynamo.Table(_get_trace_table_name())
         resp   = table.scan(FilterExpression=Attr("thread_id").eq(thread_id))
-        return {"thread_id": thread_id, "traces": resp.get("Items", []), "count": len(resp.get("Items", []))}
+        return {"thread_id": thread_id, "traces": resp.get("Items", []),
+                "count": len(resp.get("Items", []))}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
 
 @app.get(f"/api/v1/{AGENT}/prompt")
 async def get_prompt_info(_: str = Depends(verify_api_key)):

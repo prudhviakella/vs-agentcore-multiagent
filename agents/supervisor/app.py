@@ -39,6 +39,7 @@ import asyncio
 import logging
 import os
 import time
+import uuid
 
 from bedrock_agentcore import BedrockAgentCoreApp, BedrockAgentCoreContext
 
@@ -100,8 +101,11 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
     domain      = payload.get("domain",      "pharma")
     is_resume   = payload.get("resume",      False)
     user_answer = payload.get("user_answer", "")
+    # Unique per request — used as DynamoDB key for feedback
+    # thread_id is session-level (reused across messages); request_id is per-message
+    request_id  = str(uuid.uuid4())
 
-    log.info(f"[Supervisor] {'resume' if is_resume else 'chat'}  thread={thread_id[:8]}")
+    log.info(f"[Supervisor] {'resume' if is_resume else 'chat'}  thread={thread_id[:8]}  req={request_id[:8]}")
 
     try:
         # ── Step 1: Cold start ─────────────────────────────────────────────
@@ -179,8 +183,10 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
     finally:
         # Always yield "done" — platform and UI wait for this
         elapsed = round((time.perf_counter() - t0) * 1_000, 2)
-        log.info(f"[Supervisor] Done  latency_ms={elapsed}")
-        yield {"type": "done", "latency_ms": elapsed}
+        log.info(f"[Supervisor] Done  latency_ms={elapsed}  req={request_id[:8]}")
+        # run_id = thread_id — matches TracerMiddleware's DynamoDB partition key
+        # so feedback UpdateItem hits the same item as the trace PutItem
+        yield {"type": "done", "latency_ms": elapsed, "run_id": thread_id}
 
 
 if __name__ == "__main__":

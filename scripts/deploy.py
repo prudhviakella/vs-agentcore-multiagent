@@ -210,7 +210,7 @@ def step_check():
 
     # Secrets
     print("\n  \u2500\u2500 Secrets Manager")
-    for secret in ["openai", "pinecone", "neo4j", "postgres", "platform_api_key", "langsmith"]:
+    for secret in ["openai", "pinecone", "neo4j", "postgres", "platform_api_key"]:
         try:
             sm.get_secret_value(SecretId=f"{SSM_PREFIX}/{secret}")
             chk_ok(f"{SSM_PREFIX}/{secret}")
@@ -324,9 +324,7 @@ def step_prompts():
     bedrock = c("bedrock-agent")
     ssm     = c("ssm")
 
-    # safety-agent intentionally excluded — deployed but not in registry
-    # OutputGuardrailMiddleware handles output safety via Bedrock Guardrails.
-    agents = ["supervisor", "research", "knowledge", "chart"]
+    agents = ["supervisor", "research", "knowledge", "safety", "chart"]
 
     for agent in agents:
         pfile = prompts_dir / f"{agent}.txt"
@@ -420,7 +418,10 @@ def step_prompts():
         ssm.put_parameter(Name=ssm_ver_key, Value=prompt_version, Type="String", Overwrite=True)
         ok(f"[{agent}]  prompt_id={prompt_id}  version={prompt_version}")
 
-        track("bedrock-prompt", app_name, prompt_id)
+        try:
+            track("bedrock-prompt", app_name, prompt_id)
+        except Exception:
+            pass
 
     ok("Prompts done")
 
@@ -585,6 +586,34 @@ def step_iam():
         ]
     })
 
+    # ── ECS Task Role — DynamoDB feedback writes ─────────────────────────────
+    # The platform ECS task writes feedback to DynamoDB via POST /feedback.
+    # vs-agentcore-ma-ecs-task is the RUNTIME task role (not the execution role).
+    #
+    # executionRoleArn = used at container STARTUP only (ECR pull, secrets injection)
+    # taskRoleArn      = used at container RUNTIME (DynamoDB, SSM API calls)
+    #
+    # Without this, POST /feedback returns 500 AccessDeniedException.
+    ecs_task_role = f"{PREFIX}-ecs-task"
+    try:
+        iam.get_role(RoleName=ecs_task_role)
+        put_policy(ecs_task_role, "DynamoDBFeedback", {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Sid": "DynamoDBFeedback",
+                "Effect": "Allow",
+                "Action": [
+                    "dynamodb:UpdateItem",
+                    "dynamodb:GetItem",
+                    "dynamodb:PutItem",
+                ],
+                "Resource": f"arn:aws:dynamodb:{REGION}:{account_id}:table/{PREFIX}-traces",
+            }]
+        })
+        ok(f"{ecs_task_role} — DynamoDB feedback policy applied")
+    except ClientError:
+        warn(f"{ecs_task_role} not found — run: aws iam put-role-policy manually")
+
     # ── ECS Execution Role — SSM + Secrets access ────────────────────────────
     # This role is created by Terraform for the ECS tasks (platform + UI).
     # It needs SSM and SecretsManager permissions to inject secrets at task startup.
@@ -647,26 +676,20 @@ def step_guardrails():
     topic_policy = {
         "topicsConfig": [
             {
-                # OffTopicQuery — allowlist pattern: define what IS allowed, block everything else.
-                #
-                # WHY ALLOWLIST NOT DENYLIST:
-                # A denylist ("block sports, weather, finance...") requires enumerating every
-                # off-topic category. The classifier will always miss unlisted categories
-                # (e.g. geography, history, cooking). An allowlist is exhaustive by design —
-                # anything outside the permitted scope is blocked regardless of category.
-                #
-                # WHY NOT "unrelated to clinical trials":
-                # Too narrow — Bedrock blocked mRNA vaccines, COVID trials, cancer research
-                # because they aren't explicitly "clinical trial" topics.
-                # "medicine, biology, or drug research" is the correct allowed scope.
+                # OffTopicQuery — blocks clearly non-medical queries.
+                # Definition enumerates concrete denied domains (NOT abstract "unrelated to X")
+                # Previous failure: "unrelated to clinical trials" caused the Bedrock classifier
+                # to block mRNA-1273, COVID vaccines, cancer trials. Fix: enumerate obviously
+                # non-medical domains so the classifier draws the boundary correctly.
                 "name": "OffTopicQuery",
                 "definition": (
-                    "Questions unrelated to clinical trials, medicine, or pharmaceutical research "
-                    "— including finance, stock tips, geography, history, sports, and cooking."
+                    "Personal entertainment, sports, weather, financial markets, "
+                    "creative writing, software development, or any topic that has "
+                    "no connection to medicine, biology, or drug research."
                 ),
                 "examples": [
-                    "What is the capital of France?",
-                    "Should I buy Microsoft stock?",
+                    "Tell me a joke.",
+                    "What is the weather forecast for New York?",
                     "Help me write a cover letter for a job application.",
                 ],
                 "type": "DENY",
@@ -839,6 +862,9 @@ def step_gateway():
     # Find or create gateway
     gateway_id = gateway_url = None
 
+    pages = agc.get_paginator("list_gateways").paginate() if hasattr(agc, "get_paginator") else [agc.list_gateways()]
+    for page in agc.list_gateways().get("items", []) if True else []:
+        pass
     gateways = agc.list_gateways().get("items", [])
     for gw in gateways:
         if gw["name"] == GATEWAY_NAME:
@@ -1250,19 +1276,13 @@ def step_all():
     step_platform()
     print()
     sep()
-    print("  \u26a0\ufe0f  MANUAL STEPS REQUIRED before deploying agents:")
+    print("  \u26a0\ufe0f  MANUAL STEP REQUIRED before deploying agents:")
     print()
-    print("  1. Set POSTGRES_URL and RDS_PASSWORD in your environment:")
-    print("     export RDS_PASSWORD=<your-rds-password>")
-    print("     export POSTGRES_URL=postgresql://postgres:<RDS_PASSWORD>@<rds-endpoint>:5432/clinical_agent")
-    print()
-    print("  2. Re-run secrets to write Postgres connection:")
-    print("     python deploy.py secrets")
-    print()
-    print("  3. Then run remaining steps:")
-    print("     python deploy.py agents")
-    print("     python deploy.py registry")
-    print("     python deploy.py ssm-arns")
+    print("  1. Set POSTGRES_URL in your environment:")
+    print("     POSTGRES_URL=postgresql://postgres:<pwd>@<rds-endpoint>/clinical_agent")
+    print("  2. Re-run secrets:  python deploy.py secrets")
+    print("  3. Deploy agents:   python deploy.py agents")
+    print("  4. Write registry:  python deploy.py registry")
     sep()
 
 

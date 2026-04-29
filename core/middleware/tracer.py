@@ -246,6 +246,18 @@ class TracerMiddleware(BaseAgentMiddleware):
         self._llm_timings[run_id] = []
 
         ctx = getattr(runtime, "context", None) or {}
+
+        # If agent_context passes an explicit run_id (unique per message),
+        # use it so the trace and feedback share the same DynamoDB key.
+        # Falls back to whatever _get_run_id() returns (thread_id) if not set.
+        if ctx.get("run_id"):
+            # Re-key the in-flight trace dicts to the new run_id
+            new_run_id = ctx["run_id"]
+            if run_id != new_run_id:
+                if run_id in self._t0:          self._t0[new_run_id]          = self._t0.pop(run_id)
+                if run_id in self._llm_timings: self._llm_timings[new_run_id] = self._llm_timings.pop(run_id)
+                run_id = new_run_id
+
         self._ctx[run_id] = {
             "user_id":    ctx.get("user_id",    "anonymous"),
             "session_id": ctx.get("session_id", "unknown"),
