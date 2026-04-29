@@ -661,13 +661,12 @@ def step_guardrails():
                 # "medicine, biology, or drug research" is the correct allowed scope.
                 "name": "OffTopicQuery",
                 "definition": (
-                    "Any question not related to medicine, biology, drug research, "
-                    "clinical trials, or pharmaceutical science. This includes geography, "
-                    "history, sports, finance, cooking, travel, and software topics."
+                    "Questions unrelated to clinical trials, medicine, or pharmaceutical research "
+                    "— including finance, stock tips, geography, history, sports, and cooking."
                 ),
                 "examples": [
                     "What is the capital of France?",
-                    "What is the weather forecast for New York?",
+                    "Should I buy Microsoft stock?",
                     "Help me write a cover letter for a job application.",
                 ],
                 "type": "DENY",

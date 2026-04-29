@@ -50,9 +50,25 @@ async def _proxy_sse(url: str, payload: dict):
     async def generate():
         async with httpx.AsyncClient(timeout=300) as client:
             async with client.stream("POST", url, headers=HEADERS, json=payload) as resp:
+
+                # Non-2xx from platform API means guardrail block or auth failure.
+                # The body is {"detail": "..."} JSON — not an SSE stream.
+                # Convert it to a typed SSE error event so the UI renders it properly.
+                if resp.status_code >= 400:
+                    import json as _json
+                    body = await resp.aread()
+                    try:
+                        detail = _json.loads(body).get("detail") or body.decode()
+                    except Exception:
+                        detail = body.decode(errors="replace")
+                    yield f"data: {_json.dumps({'type': 'error', 'message': detail})}\n"
+                    yield f"data: {_json.dumps({'type': 'done', 'latency_ms': 0})}\n"
+                    return
+
                 async for line in resp.aiter_lines():
                     if line:
                         yield line + "\n"
+
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
@@ -456,6 +472,20 @@ async function sse(url, payload) {
       headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
       body: JSON.stringify(payload),
     });
+
+    // Non-2xx means platform or guardrail rejected the request before streaming.
+    // The body is a JSON error object e.g. {"detail": "Your request could not be processed..."}
+    // Parse it and show the message directly — do not try to read SSE from an error body.
+    if (!resp.ok) {
+      try {
+        const errJson = await resp.json();
+        const msg = errJson.detail || errJson.message || errJson.error || `HTTP ${resp.status}`;
+        addErr(msg);
+      } catch {
+        addErr(`Request failed (HTTP ${resp.status})`);
+      }
+      return;
+    }
 
     const reader  = resp.body.getReader();
     const decoder = new TextDecoder();
