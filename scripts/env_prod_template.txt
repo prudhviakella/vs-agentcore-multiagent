@@ -27,6 +27,8 @@ export POSTGRES_URL=postgresql://postgres:CHANGE_ME@CHANGE_ME.rds.amazonaws.com:
 # ── Terraform ───────────────────────────────────────────────────────────────
 export TF_STATE_BUCKET=vs-agentcore-ma-tfstate
 
+export COHERE_API_KEY="your-cohere-key-here"
+
 # ── Sub-agent URLs (populated by deploy.sh ssm-arns after agents deploy) ────
 export RESEARCH_AGENT_URL=
 export KNOWLEDGE_AGENT_URL=

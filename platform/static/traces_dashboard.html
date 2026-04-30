@@ -37,7 +37,7 @@ header{display:flex;align-items:center;justify-content:space-between;padding:0 2
 .content{height:100%;overflow-y:auto;padding:20px 24px;display:flex;flex-direction:column;gap:20px;box-sizing:border-box}
 .content::-webkit-scrollbar{width:3px}
 .content::-webkit-scrollbar-thumb{background:var(--border-2);border-radius:2px}
-.cards{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}
+.cards{display:grid;grid-template-columns:repeat(6,1fr);gap:12px}
 .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:16px;display:flex;flex-direction:column;gap:6px;position:relative;overflow:hidden}
 .card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px}
 .card.blue::before{background:var(--accent)}.card.green::before{background:var(--green)}
@@ -82,6 +82,8 @@ tr.selected td{background:var(--accent-dim)}
 .badge.amber{color:var(--amber);background:var(--amber-dim);border:1px solid rgba(255,179,64,.2)}
 .badge.blue{color:var(--accent);background:var(--accent-dim);border:1px solid rgba(0,194,255,.2)}
 .badge.purple{color:var(--purple);background:var(--purple-dim);border:1px solid rgba(192,132,252,.2)}
+.badge.fb-pos{color:var(--green);background:var(--green-dim);border:1px solid rgba(0,229,160,.2)}
+.badge.fb-neg{color:var(--red);background:var(--red-dim);border:1px solid rgba(255,77,106,.2)}
 .tools-cell{display:flex;gap:4px;flex-wrap:wrap}
 .tool-tag{font-size:9px;font-family:var(--mono);background:var(--surface-2);border:1px solid var(--border);color:var(--text-2);padding:1px 6px;border-radius:4px}
 .detail-overlay{position:fixed;inset:0;background:rgba(7,17,30,.7);backdrop-filter:blur(4px);z-index:100;display:none;align-items:flex-end;justify-content:flex-end}
@@ -126,6 +128,7 @@ tr.selected td{background:var(--accent-dim)}
 .score-track{flex:1;height:5px;background:var(--surface-2);border-radius:3px;overflow:hidden}
 .score-fill{height:100%;border-radius:3px}
 .score-val{font-size:11px;width:32px;text-align:right;font-weight:500}
+.fb-section{background:var(--amber-dim);border:1px solid rgba(255,179,64,.25);border-radius:var(--r);padding:12px}
 .pagination{display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-top:1px solid var(--border);background:var(--surface-2)}
 .page-info{font-size:11px;color:var(--text-2)}
 .page-btns{display:flex;gap:6px;align-items:center}
@@ -139,6 +142,32 @@ tr.selected td{background:var(--accent-dim)}
 @keyframes spin{to{transform:rotate(360deg)}}
 .empty{text-align:center;padding:40px;color:var(--text-3)}
 .err-banner{padding:12px 16px;background:var(--red-dim);border:1px solid rgba(255,77,106,.3);border-radius:var(--r);color:var(--red);font-size:12px}
+/* ── tabs ── */
+.tabs{display:flex;gap:2px;padding:0 24px;border-bottom:1px solid var(--border);background:var(--surface)}
+.tab{font-size:12px;font-family:var(--font);background:none;border:none;border-bottom:2px solid transparent;color:var(--text-2);padding:12px 18px;cursor:pointer;transition:.15s;letter-spacing:.02em}
+.tab:hover{color:var(--text)}
+.tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+.tab-panel{display:none}.tab-panel.active{display:flex;flex-direction:column;gap:20px}
+/* ── learning panel ── */
+.learn-section{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);overflow:hidden}
+.learn-section-title{font-size:10px;color:var(--text-3);letter-spacing:.08em;text-transform:uppercase;padding:8px 16px;background:var(--surface-2);border-bottom:1px solid var(--border)}
+.learn-body{padding:16px}
+.run-btn{background:var(--accent);border:none;border-radius:var(--r);color:var(--bg);font-family:var(--font);font-size:13px;font-weight:500;padding:10px 24px;cursor:pointer;transition:.15s;display:flex;align-items:center;gap:8px}
+.run-btn:hover{background:#33ccff}
+.run-btn:disabled{background:var(--border);cursor:not-allowed}
+.status-pill{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:20px;font-size:11px}
+.status-pill.deployed{color:var(--green);background:var(--green-dim);border:1px solid rgba(0,229,160,.2)}
+.status-pill.skipped{color:var(--text-2);background:var(--surface-2);border:1px solid var(--border)}
+.status-pill.self_test_failed{color:var(--amber);background:var(--amber-dim);border:1px solid rgba(255,179,64,.2)}
+.status-pill.error{color:var(--red);background:var(--red-dim);border:1px solid rgba(255,77,106,.2)}
+.gap-item{padding:8px 12px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r);margin-bottom:6px}
+.gap-topic{font-size:12px;font-weight:500;color:var(--amber);margin-bottom:4px}
+.gap-q{font-size:11px;color:var(--text-2);margin-left:8px;line-height:1.6}
+.pattern-row{display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);font-size:12px}
+.pattern-row:last-child{border-bottom:none}
+.finetune-preview{font-family:var(--mono);font-size:10px;color:var(--text-2);background:var(--bg);border:1px solid var(--border);border-radius:var(--r);padding:10px;max-height:140px;overflow-y:auto;white-space:pre-wrap;line-height:1.5}
+.dl-btn{background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r);color:var(--text-2);font-family:var(--font);font-size:11px;padding:5px 12px;cursor:pointer;transition:.15s}
+.dl-btn:hover{border-color:var(--accent);color:var(--accent)}
 </style>
 </head>
 <body>
@@ -164,8 +193,12 @@ tr.selected td{background:var(--accent-dim)}
     </div>
   </header>
 
+  <div class="tabs">
+    <button class="tab active" onclick="switchTab('traces',this)">📊 Traces</button>
+    <button class="tab" onclick="switchTab('learning',this)">🧠 Learning Pipeline</button>
+  </div>
   <div class="main">
-    <div class="content">
+    <div class="tab-panel active" id="tab-traces"><div class="content">
 
       <div id="err-area"></div>
 
@@ -194,6 +227,11 @@ tr.selected td{background:var(--accent-dim)}
           <div class="card-label">HITL Fire Rate</div>
           <div class="card-value red" id="c-hitl">—</div>
           <div class="card-sub" id="c-hitl-sub">—</div>
+        </div>
+        <div class="card" style="border-top:2px solid var(--amber)">
+          <div class="card-label">Feedback Rate</div>
+          <div class="card-value" id="c-fb" style="color:var(--amber)">—</div>
+          <div class="card-sub" id="c-fb-sub">—</div>
         </div>
       </div>
 
@@ -224,6 +262,8 @@ tr.selected td{background:var(--accent-dim)}
             <button class="filter-btn" onclick="setFilter('cache',this)">Cache hits</button>
             <button class="filter-btn" onclick="setFilter('errors',this)">Errors</button>
             <button class="filter-btn" onclick="setFilter('blocked',this)">Blocked</button>
+            <button class="filter-btn" onclick="setFilter('fb_pos',this)">👍 Positive</button>
+            <button class="filter-btn" onclick="setFilter('fb_neg',this)">👎 Negative</button>
           </div>
         </div>
         <div id="table-wrap">
@@ -232,7 +272,49 @@ tr.selected td{background:var(--accent-dim)}
         <div class="pagination" id="pagination" style="display:none"></div>
       </div>
 
-    </div>
+    </div></div><!-- /tab-traces -->
+
+    <div class="tab-panel" id="tab-learning"><div class="content">
+
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <div>
+          <div style="font-size:18px;font-weight:500;margin-bottom:4px">Continuous Learning Pipeline</div>
+          <div style="font-size:12px;color:var(--text-2)">Analyzes feedback traces → improves prompts → detects RAG gaps → exports fine-tune data. Fully automated.</div>
+        </div>
+        <button class="run-btn" id="run-btn" onclick="runPipeline()">
+          <span id="run-icon">▶</span> Run Pipeline
+        </button>
+      </div>
+
+      <div id="learn-status" style="display:none" class="err-banner" style="background:var(--accent-dim);border-color:rgba(0,194,255,.3);color:var(--accent)"></div>
+
+      <div id="learn-results" style="display:none">
+
+        <!-- Summary cards -->
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px" id="learn-cards"></div>
+
+        <!-- Prompt improvement -->
+        <div class="learn-section" id="learn-prompt">
+          <div class="learn-section-title">① Prompt Improvement</div>
+          <div class="learn-body" id="learn-prompt-body"></div>
+        </div>
+
+        <!-- RAG gaps -->
+        <div class="learn-section" id="learn-rag">
+          <div class="learn-section-title">② RAG Gap Detection</div>
+          <div class="learn-body" id="learn-rag-body"></div>
+        </div>
+
+        <!-- Fine-tune dataset -->
+        <div class="learn-section" id="learn-ft">
+          <div class="learn-section-title">③ Fine-Tuning Dataset</div>
+          <div class="learn-body" id="learn-ft-body"></div>
+        </div>
+
+      </div>
+
+    </div></div><!-- /tab-learning -->
+
   </div>
 </div>
 
@@ -247,8 +329,8 @@ tr.selected td{background:var(--accent-dim)}
 </div>
 
 <script>
-let allTraces    = [];   // raw from DynamoDB (always supervisor-agent)
-let filteredByAgent = []; // what's shown — filtered by currentAgent
+let allTraces    = [];
+let filteredByAgent = [];
 let filter       = 'all';
 let selected     = null;
 let currentAgent = 'supervisor-agent';
@@ -268,17 +350,14 @@ function applyAgentFilter() {
   if (currentAgent === 'supervisor-agent') {
     filteredByAgent = allTraces;
   } else {
-    // For sub-agents: show supervisor traces that called this sub-agent
-    // and project the span data into a pseudo-trace for display
-    const agentKey = currentAgent.replace('-agent',''); // e.g. "research"
-    const toolName = agentKey + '_agent';               // e.g. "research_agent"
+    const agentKey = currentAgent.replace('-agent','');
+    const toolName = agentKey + '_agent';
     filteredByAgent = allTraces
       .filter(t => (t.tools||[]).includes(toolName))
       .map(t => {
         const span = (t.agent_spans||[]).find(s => s.agent === agentKey) || {};
         return {
           ...t,
-          // Override display fields with sub-agent span data
           _sub_agent_view: true,
           _sub_agent_name: agentKey,
           elapsed_ms:      span.elapsed_ms || t.elapsed_ms,
@@ -293,7 +372,6 @@ function applyAgentFilter() {
 
 async function loadTraces() {
   try {
-    // Always fetch supervisor traces — they contain all sub-agent span data
     const res = await fetch('/api/v1/clinical-trial/traces?agent=supervisor-agent', {
       headers: { 'X-API-Key': window.PLATFORM_API_KEY || '' }
     });
@@ -341,6 +419,13 @@ function renderCards() {
   set('c-cache-sub', `${cacheHits} of ${total} queries`);
   set('c-hitl',      `${Math.round(hitlFired/total*100)}%`);
   set('c-hitl-sub',  `${hitlFired} interrupts`);
+
+  // ── Feedback stats ──────────────────────────────────────────────────────
+  const fbTotal = t.filter(r => r.feedback_rating).length;
+  const fbNeg   = t.filter(r => r.feedback_rating === 'negative').length;
+  const fbPos   = t.filter(r => r.feedback_rating === 'positive').length;
+  set('c-fb',     fbTotal ? `${Math.round(fbTotal/total*100)}%` : '0%');
+  set('c-fb-sub', fbTotal ? `👍 ${fbPos}  👎 ${fbNeg}` : 'No feedback yet');
 }
 
 function median(arr) {
@@ -397,7 +482,10 @@ function renderChartTools() {
       counts[name] = (counts[name]||0) + 1;
     });
   });
-  if (!Object.keys(counts).length) { document.getElementById('tools-legend').innerHTML='<div style="color:var(--text-3);font-size:11px">No data</div>'; return; }
+  if (!Object.keys(counts).length) {
+    document.getElementById('tools-legend').innerHTML='<div style="color:var(--text-3);font-size:11px">No data</div>';
+    return;
+  }
   const entries = Object.entries(counts).sort((a,b)=>b[1]-a[1]).slice(0,5);
   const total   = entries.reduce((s,[,v])=>s+v,0)||1;
   const colors  = ['#00c2ff','#00e5a0','#ffb340','#ff4d6a','#c084fc'];
@@ -445,6 +533,8 @@ function filteredRows() {
   if (filter === 'cache')   rows = rows.filter(r => r.cache_hit);
   if (filter === 'errors')  rows = rows.filter(r => r.has_errors);
   if (filter === 'blocked') rows = rows.filter(r => r.guardrail_blocked);
+  if (filter === 'fb_pos')  rows = rows.filter(r => r.feedback_rating === 'positive');
+  if (filter === 'fb_neg')  rows = rows.filter(r => r.feedback_rating === 'negative');
   return rows;
 }
 
@@ -472,7 +562,7 @@ function renderTable() {
     <thead><tr>
       <th>Run ID</th><th>Question</th><th>Tools</th>
       <th>Tokens</th><th>Cost</th><th>Latency</th>
-      <th>HITL</th><th>Guardrail</th>
+      <th>HITL</th><th>Guardrail</th><th>Feedback</th>
     </tr></thead>
     <tbody>
     ${pageRows.map(r => `
@@ -491,13 +581,15 @@ function renderTable() {
         <td>${r.guardrail_blocked
           ? `<span class="badge red">blocked</span>`
           : `<span class="badge green">passed</span>`}</td>
+        <td>${r.feedback_rating === 'positive'
+          ? `<span class="badge fb-pos">👍</span>`
+          : r.feedback_rating === 'negative'
+          ? `<span class="badge fb-neg">👎 ${r.feedback_reason ? esc(r.feedback_reason.slice(0,12)) : ''}</span>`
+          : `<span style="color:var(--text-3);font-size:11px">—</span>`}</td>
       </tr>`).join('')}
     </tbody></table>`;
 
-  // ── Pagination bar ──────────────────────────────────────────────────────
   pag.style.display = 'flex';
-
-  // Page number buttons — show up to 7 around current page
   let pageBtns = '';
   const window_size = 7;
   let p_start = Math.max(1, currentPage - Math.floor(window_size/2));
@@ -513,9 +605,7 @@ function renderTable() {
   if (p_end < pages) pageBtns += `<button class="page-btn" onclick="goPage(${pages})">${pages}</button>`;
 
   pag.innerHTML = `
-    <span class="page-info">
-      Showing ${start+1}–${end} of ${total} traces
-    </span>
+    <span class="page-info">Showing ${start+1}–${end} of ${total} traces</span>
     <div class="page-btns">
       <button class="page-btn" onclick="goPage(${currentPage-1})" ${currentPage===1?'disabled':''}>‹ Prev</button>
       ${pageBtns}
@@ -545,8 +635,29 @@ function setPageSize(n) {
 }
 
 function trimQ(q) {
-  // Strip the [HITL Answer]: prefix
   return q.replace(/^\[HITL Answer\]:\s*/,'').trim();
+}
+
+function renderFeedbackSection(r) {
+  if (!r.feedback_rating) return '';
+  const isPos = r.feedback_rating === 'positive';
+  return `
+    <div class="detail-section">
+      <div class="ds-title">User Feedback</div>
+      <div class="ds-body">
+        <div class="fb-section">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:${r.feedback_reason||r.feedback_comment?'10':'0'}px">
+            <span style="font-size:22px">${isPos ? '👍' : '👎'}</span>
+            <span style="font-size:14px;font-weight:500;color:${isPos ? 'var(--green)' : 'var(--red)'}">
+              ${isPos ? 'Helpful' : 'Not Helpful'}
+            </span>
+            ${r.feedback_reason ? `<span class="badge ${isPos?'fb-pos':'fb-neg'}" style="margin-left:auto">${esc(r.feedback_reason)}</span>` : ''}
+          </div>
+          ${r.feedback_comment ? `<div style="font-size:12px;color:var(--text-2);margin-bottom:8px;padding:8px 10px;background:var(--surface-2);border-radius:6px;font-style:italic">"${esc(r.feedback_comment)}"</div>` : ''}
+          <div style="font-size:10px;color:var(--text-3)">Submitted: ${r.feedback_ts || '—'}</div>
+        </div>
+      </div>
+    </div>`;
 }
 
 function openDetail(runId) {
@@ -582,6 +693,8 @@ function openDetail(runId) {
     </div>
 
     ${renderAgentSpans(r)}
+    ${renderFeedbackSection(r)}
+
     <div class="detail-section">
       <div class="ds-title">Question</div>
       <div class="ds-body"><div class="q-text">${esc(trimQ(r.question||''))}</div></div>
@@ -675,8 +788,6 @@ function closeDetail(e) {
   renderTable();
 }
 
-
-
 function set(id, val) {
   const el = document.getElementById(id);
   if (el) el.textContent = val;
@@ -731,6 +842,136 @@ function renderAgentSpans(trace) {
 // Boot + auto-refresh every 30s
 loadTraces();
 setInterval(loadTraces, 30000);
+
+// ── Tab switching ──────────────────────────────────────────────────────────
+function switchTab(name, btn) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById('tab-' + name).classList.add('active');
+}
+
+// ── Learning Pipeline ──────────────────────────────────────────────────────
+async function runPipeline() {
+  const btn  = document.getElementById('run-btn');
+  const icon = document.getElementById('run-icon');
+  const stat = document.getElementById('learn-status');
+  const res  = document.getElementById('learn-results');
+
+  btn.disabled  = true;
+  icon.textContent = '⟳';
+  stat.style.display = 'block';
+  stat.style.background = 'var(--accent-dim)';
+  stat.style.borderColor = 'rgba(0,194,255,.3)';
+  stat.style.color = 'var(--accent)';
+  stat.textContent = '⏳ Running pipeline… this may take 30–90 seconds';
+  res.style.display = 'none';
+
+  try {
+    const r = await fetch('/api/v1/clinical-trial/learning/run', {
+      method: 'POST',
+      headers: { 'X-API-Key': window.PLATFORM_API_KEY || '', 'Content-Type': 'application/json' },
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+    const report = await r.json();
+    renderLearningReport(report);
+    stat.style.background = 'var(--green-dim)';
+    stat.style.borderColor = 'rgba(0,229,160,.2)';
+    stat.style.color = 'var(--green)';
+    stat.textContent = `✓ Pipeline complete — run_id: ${(report.run_id||'').slice(0,8)}`;
+    res.style.display = 'flex';
+    res.style.flexDirection = 'column';
+    res.style.gap = '16px';
+  } catch(e) {
+    stat.style.background = 'var(--red-dim)';
+    stat.style.borderColor = 'rgba(255,77,106,.3)';
+    stat.style.color = 'var(--red)';
+    stat.textContent = `⚠ Pipeline error: ${e.message}`;
+  } finally {
+    btn.disabled = false;
+    icon.textContent = '▶';
+  }
+}
+
+function renderLearningReport(r) {
+  // Summary cards
+  document.getElementById('learn-cards').innerHTML = `
+    <div class="card blue"><div class="card-label">Traces Analyzed</div>
+      <div class="card-value blue">${r.traces_analyzed||0}</div>
+      <div class="card-sub">👍 ${r.positive_count||0}  👎 ${r.negative_count||0}</div></div>
+    <div class="card ${r.prompt_result?.status==='deployed'?'green':'amber'}">
+      <div class="card-label">Prompt Status</div>
+      <div class="card-value ${r.prompt_result?.status==='deployed'?'green':'amber'}">${r.prompt_result?.status||'—'}</div>
+      <div class="card-sub">${r.prompt_result?.status==='deployed'?'v'+r.prompt_result.old_version+' → v'+r.prompt_result.new_version:'—'}</div></div>
+    <div class="card purple"><div class="card-label">RAG Gaps</div>
+      <div class="card-value purple">${(r.rag_gaps||[]).length}</div>
+      <div class="card-sub">topic clusters identified</div></div>
+    <div class="card green"><div class="card-label">Fine-tune Examples</div>
+      <div class="card-value green">${r.finetune_examples||0}</div>
+      <div class="card-sub">positive traces exported</div></div>`;
+
+  // Prompt improvement
+  const pr = r.prompt_result || {};
+  const statusClass = pr.status || 'skipped';
+  let promptHtml = `<div style="margin-bottom:12px">
+    <span class="status-pill ${statusClass}">● ${pr.status||'—'}</span>
+    <span style="margin-left:10px;font-size:12px;color:var(--text-2)">${esc(pr.reason||'')}</span>
+  </div>`;
+  if (pr.status === 'deployed') {
+    promptHtml += `
+      <div style="font-size:12px;color:var(--text);margin-bottom:10px">
+        <strong>Changes:</strong> ${esc(pr.changes_summary||'')}
+      </div>
+      <div style="font-size:11px;color:var(--text-3);margin-bottom:6px">Failure patterns addressed:</div>`;
+    (pr.patterns||[]).forEach(p => {
+      promptHtml += `<div class="pattern-row">
+        <span style="color:var(--text)">${esc(p.reason)}</span>
+        <span class="badge red">${p.count} trace${p.count===1?'':'s'}</span>
+      </div>`;
+    });
+    promptHtml += `<div style="margin-top:10px;padding:8px 12px;background:var(--green-dim);border:1px solid rgba(0,229,160,.2);border-radius:var(--r);font-size:11px;color:var(--green)">
+      ✓ Self-test passed · Deployed prompt v${pr.old_version} → v${pr.new_version}</div>`;
+  } else if (pr.status === 'self_test_failed') {
+    promptHtml += `<div style="padding:8px 12px;background:var(--amber-dim);border:1px solid rgba(255,179,64,.2);border-radius:var(--r);font-size:11px;color:var(--amber)">
+      ⚠ Self-test failed — improved prompt was NOT deployed. Manual review recommended.</div>`;
+  }
+  document.getElementById('learn-prompt-body').innerHTML = promptHtml;
+
+  // RAG gaps
+  const gaps = r.rag_gaps || [];
+  let ragHtml = gaps.length
+    ? `<div style="font-size:11px;color:var(--text-2);margin-bottom:10px">${gaps.length} topic cluster${gaps.length===1?'':'s'} identified where the knowledge base lacked information. Consider ingesting documents covering these areas.</div>`
+    : `<div style="color:var(--text-3);font-size:12px">No RAG gaps detected in current traces.</div>`;
+  gaps.forEach(g => {
+    ragHtml += `<div class="gap-item">
+      <div class="gap-topic">📂 ${esc(g.topic)} <span style="font-size:10px;color:var(--text-3);font-weight:normal">(${g.frequency} occurrence${g.frequency===1?'':'s'})</span></div>
+      ${(g.questions||[]).map(q => `<div class="gap-q">• ${esc(q)}</div>`).join('')}
+    </div>`;
+  });
+  document.getElementById('learn-rag-body').innerHTML = ragHtml;
+
+  // Fine-tuning
+  const ft  = r.finetune_examples || 0;
+  const jsonl = r.finetune_jsonl || '';
+  let ftHtml = ft > 0
+    ? `<div style="font-size:12px;color:var(--text-2);margin-bottom:10px">${ft} high-quality (👍 positive feedback) trace${ft===1?'':'s'} exported in OpenAI fine-tuning format.</div>
+       <div class="finetune-preview">${esc(jsonl.split('\n').slice(0,3).join('\n'))}</div>
+       <div style="margin-top:10px">
+         <button class="dl-btn" onclick="downloadJsonl(${JSON.stringify(jsonl)})">⬇ Download JSONL</button>
+       </div>`
+    : `<div style="color:var(--text-3);font-size:12px">No positive feedback traces available yet. Collect 👍 feedback from users to build a fine-tuning dataset.</div>`;
+  document.getElementById('learn-ft-body').innerHTML = ftHtml;
+}
+
+function downloadJsonl(jsonl) {
+  const blob = new Blob([jsonl], {type: 'application/jsonl'});
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = `vs-agentcore-finetune-${new Date().toISOString().slice(0,10)}.jsonl`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 </script>
 </body>
 </html>

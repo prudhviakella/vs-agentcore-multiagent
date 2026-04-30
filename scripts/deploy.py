@@ -463,6 +463,13 @@ def step_secrets():
                                                    "password": os.environ["NEO4J_PASSWORD"]})
     put_secret(f"{SSM_PREFIX}/platform_api_key", {"api_key": os.environ["PLATFORM_API_KEY"]})
 
+    # Cohere Rerank API key — used by search_lambda for Stage 2 reranking
+    cohere_key = os.environ.get("COHERE_API_KEY", "")
+    if cohere_key:
+        put_secret(f"{SSM_PREFIX}/cohere", {"api_key": cohere_key})
+    else:
+        warn("COHERE_API_KEY not set — skipping. Set it then re-run: python deploy.py secrets")
+
     # Write platform_api_key to BOTH SSM paths:
     # 1. New prefix — used by agents and platform middleware
     # 2. Old prefix (/vs-agentcore/prod/) — used by Terraform main.tf secrets injection
@@ -585,34 +592,6 @@ def step_iam():
                         "xray:GetSamplingRules", "xray:GetSamplingTargets"], "Resource": "*"},
         ]
     })
-
-    # ── ECS Task Role — DynamoDB feedback writes ─────────────────────────────
-    # The platform ECS task writes feedback to DynamoDB via POST /feedback.
-    # vs-agentcore-ma-ecs-task is the RUNTIME task role (not the execution role).
-    #
-    # executionRoleArn = used at container STARTUP only (ECR pull, secrets injection)
-    # taskRoleArn      = used at container RUNTIME (DynamoDB, SSM API calls)
-    #
-    # Without this, POST /feedback returns 500 AccessDeniedException.
-    ecs_task_role = f"{PREFIX}-ecs-task"
-    try:
-        iam.get_role(RoleName=ecs_task_role)
-        put_policy(ecs_task_role, "DynamoDBFeedback", {
-            "Version": "2012-10-17",
-            "Statement": [{
-                "Sid": "DynamoDBFeedback",
-                "Effect": "Allow",
-                "Action": [
-                    "dynamodb:UpdateItem",
-                    "dynamodb:GetItem",
-                    "dynamodb:PutItem",
-                ],
-                "Resource": f"arn:aws:dynamodb:{REGION}:{account_id}:table/{PREFIX}-traces",
-            }]
-        })
-        ok(f"{ecs_task_role} — DynamoDB feedback policy applied")
-    except ClientError:
-        warn(f"{ecs_task_role} not found — run: aws iam put-role-policy manually")
 
     # ── ECS Execution Role — SSM + Secrets access ────────────────────────────
     # This role is created by Terraform for the ECS tasks (platform + UI).

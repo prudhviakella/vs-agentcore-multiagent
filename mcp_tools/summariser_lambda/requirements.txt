@@ -1,2 +1,2 @@
-openai==1.68.2
-boto3==1.37.28
+boto3
+openai>=1.0.0

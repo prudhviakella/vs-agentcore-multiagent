@@ -39,6 +39,7 @@ from fastapi.responses import StreamingResponse, HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from gateway.auth import verify_api_key, _get_api_key
+from learning_pipeline import ContinuousLearningPipeline
 from gateway.rate_limiter import RateLimiter
 from gateway.schemas import ChatRequest, ResumeRequest
 from gateway.logging_mw import LoggingMiddleware
@@ -361,6 +362,44 @@ async def get_trace(thread_id: str, _: str = Depends(verify_api_key)):
                 "count": len(resp.get("Items", []))}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ── Continuous Learning ──────────────────────────────────────────────────
+
+_last_learning_report: dict = {}
+
+@app.post(f"/api/v1/{AGENT}/learning/run")
+async def run_learning_pipeline(_: str = Depends(verify_api_key)):
+    """
+    Trigger the continuous learning pipeline on demand.
+
+    Steps:
+      1. Fetch all traces + feedback from DynamoDB
+      2. Diagnose failure patterns from negative feedback
+      3. GPT-4o rewrites supervisor prompt
+      4. Self-test: verify improved prompt classifies 3 probe queries correctly
+      5. Auto-deploy if self-test passes (Bedrock + SSM)
+      6. Detect RAG gaps from missing-info traces
+      7. Generate fine-tuning JSONL from positive traces
+    """
+    global _last_learning_report
+    try:
+        pipeline = ContinuousLearningPipeline()
+        report   = await pipeline.run()
+        _last_learning_report = report.to_dict()
+        log.info(f"[PLATFORM] Learning pipeline complete  run_id={report.run_id[:8]}")
+        return _last_learning_report
+    except Exception as exc:
+        log.error(f"[PLATFORM] Learning pipeline error: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get(f"/api/v1/{AGENT}/learning/report")
+async def get_learning_report(_: str = Depends(verify_api_key)):
+    """Return the most recent learning pipeline report."""
+    if not _last_learning_report:
+        return {"status": "no_report", "message": "Run the pipeline first."}
+    return _last_learning_report
 
 
 @app.get(f"/api/v1/{AGENT}/prompt")
