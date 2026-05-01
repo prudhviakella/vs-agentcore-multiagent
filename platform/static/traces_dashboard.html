@@ -37,7 +37,7 @@ header{display:flex;align-items:center;justify-content:space-between;padding:0 2
 .content{height:100%;overflow-y:auto;padding:20px 24px;display:flex;flex-direction:column;gap:20px;box-sizing:border-box}
 .content::-webkit-scrollbar{width:3px}
 .content::-webkit-scrollbar-thumb{background:var(--border-2);border-radius:2px}
-.cards{display:grid;grid-template-columns:repeat(6,1fr);gap:12px}
+.cards{display:grid;grid-template-columns:repeat(7,1fr);gap:12px}
 .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:16px;display:flex;flex-direction:column;gap:6px;position:relative;overflow:hidden}
 .card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px}
 .card.blue::before{background:var(--accent)}.card.green::before{background:var(--green)}
@@ -264,6 +264,8 @@ tr.selected td{background:var(--accent-dim)}
             <button class="filter-btn" onclick="setFilter('blocked',this)">Blocked</button>
             <button class="filter-btn" onclick="setFilter('fb_pos',this)">👍 Positive</button>
             <button class="filter-btn" onclick="setFilter('fb_neg',this)">👎 Negative</button>
+            <button class="filter-btn" onclick="setFilter('rag_gated',this)">🚫 RAG Gated</button>
+            <button class="filter-btn" onclick="setFilter('rag_uncited',this)">⚠ Uncited</button>
           </div>
         </div>
         <div id="table-wrap">
@@ -426,6 +428,21 @@ function renderCards() {
   const fbPos   = t.filter(r => r.feedback_rating === 'positive').length;
   set('c-fb',     fbTotal ? `${Math.round(fbTotal/total*100)}%` : '0%');
   set('c-fb-sub', fbTotal ? `👍 ${fbPos}  👎 ${fbNeg}` : 'No feedback yet');
+
+  // RAG Quality metrics — from rag_* fields written by Tracer parsing JSON envelope
+  const ragTraces   = t.filter(r => r.rag_rerank_top_score !== undefined);
+  const ragGated    = ragTraces.filter(r => r.rag_threshold_triggered).length;
+  const avgTopScore = ragTraces.length
+    ? ragTraces.reduce((s,r) => s + parseFloat(r.rag_rerank_top_score||0), 0) / ragTraces.length : 0;
+  const citTraces   = ragTraces.filter(r => r.rag_citation_coverage !== undefined);
+  const citationAvg = citTraces.length
+    ? citTraces.reduce((s,r) => s + parseFloat(r.rag_citation_coverage||0), 0) / citTraces.length : 0;
+  if (ragTraces.length) {
+    set('c-rag',     avgTopScore.toFixed(2));
+    set('c-rag-sub', `avg rerank · ${ragGated} gated · ${(citationAvg*100).toFixed(0)}% cited`);
+  } else {
+    set('c-rag', '—'); set('c-rag-sub', 'No RAG traces yet');
+  }
 }
 
 function median(arr) {
@@ -534,7 +551,9 @@ function filteredRows() {
   if (filter === 'errors')  rows = rows.filter(r => r.has_errors);
   if (filter === 'blocked') rows = rows.filter(r => r.guardrail_blocked);
   if (filter === 'fb_pos')  rows = rows.filter(r => r.feedback_rating === 'positive');
-  if (filter === 'fb_neg')  rows = rows.filter(r => r.feedback_rating === 'negative');
+  if (filter === 'fb_neg')      rows = rows.filter(r => r.feedback_rating === 'negative');
+  if (filter === 'rag_gated')   rows = rows.filter(r => r.rag_threshold_triggered === true);
+  if (filter === 'rag_uncited') rows = rows.filter(r => parseFloat(r.rag_uncited_claims_stripped||0) > 0);
   return rows;
 }
 
@@ -562,7 +581,7 @@ function renderTable() {
     <thead><tr>
       <th>Run ID</th><th>Question</th><th>Tools</th>
       <th>Tokens</th><th>Cost</th><th>Latency</th>
-      <th>HITL</th><th>Guardrail</th><th>Feedback</th>
+      <th>HITL</th><th>Guardrail</th><th>Feedback</th><th>RAG</th>
     </tr></thead>
     <tbody>
     ${pageRows.map(r => `
@@ -585,6 +604,9 @@ function renderTable() {
           ? `<span class="badge fb-pos">👍</span>`
           : r.feedback_rating === 'negative'
           ? `<span class="badge fb-neg">👎 ${r.feedback_reason ? esc(r.feedback_reason.slice(0,12)) : ''}</span>`
+          : `<span style="color:var(--text-3);font-size:11px">—</span>`}</td>
+        <td>${r.rag_rerank_top_score !== undefined
+          ? `<span class="badge ${parseFloat(r.rag_rerank_top_score)>=0.7?'green':parseFloat(r.rag_rerank_top_score)>=0.3?'amber':'red'}">${parseFloat(r.rag_rerank_top_score).toFixed(2)}</span>${r.rag_threshold_triggered?'<span style="color:var(--red);font-size:9px"> gated</span>':''}`
           : `<span style="color:var(--text-3);font-size:11px">—</span>`}</td>
       </tr>`).join('')}
     </tbody></table>`;
@@ -636,6 +658,63 @@ function setPageSize(n) {
 
 function trimQ(q) {
   return q.replace(/^\[HITL Answer\]:\s*/,'').trim();
+}
+
+function renderRagSection(r) {
+  if (r.rag_rerank_top_score === undefined) return '';
+  const topScore   = parseFloat(r.rag_rerank_top_score || 0);
+  const gated      = r.rag_threshold_triggered;
+  const s1         = r.rag_chunks_stage1 || 0;
+  const s2         = r.rag_chunks_stage2 || 0;
+  const compressed = r.rag_chunks_compressed || 0;
+  const tokBefore  = r.rag_total_tokens_before || 0;
+  const tokAfter   = r.rag_total_tokens_after  || 0;
+  const uncited    = r.rag_uncited_claims_stripped || 0;
+  const citCov     = parseFloat(r.rag_citation_coverage || 0);
+  const scoreColor = topScore>=0.7?'var(--green)':topScore>=0.3?'var(--amber)':'var(--red)';
+  const citColor   = citCov>=1.0?'var(--green)':citCov>=0.8?'var(--amber)':'var(--red)';
+  const tokReduction = tokBefore>0 ? Math.round((1-tokAfter/tokBefore)*100) : 0;
+  return `
+    <div class="detail-section">
+      <div class="ds-title">RAG Pipeline Metrics</div>
+      <div class="ds-body">
+        <div class="kv-grid">
+          <span class="kv-key">Stage 1 recall</span>
+          <span class="kv-val">${s1} chunks from Pinecone</span>
+          <span class="kv-key">Stage 2 rerank</span>
+          <span class="kv-val">
+            ${s2} kept &nbsp;·&nbsp;
+            <span style="color:${scoreColor};font-weight:500">top score: ${topScore.toFixed(3)}</span>
+            ${gated?'&nbsp;·&nbsp;<span style="color:var(--red)">⚠ confidence gate triggered</span>':''}
+          </span>
+          <span class="kv-key">Stage 3 compress</span>
+          <span class="kv-val">
+            ${compressed}/${s2} retained &nbsp;·&nbsp;
+            tokens: ${tokBefore.toLocaleString()} → ${tokAfter.toLocaleString()}
+            &nbsp;·&nbsp; ${tokReduction}% reduction
+          </span>
+          <span class="kv-key">Stage 4b citations</span>
+          <span class="kv-val">
+            <span style="color:${citColor};font-weight:500">${(citCov*100).toFixed(0)}% coverage</span>
+            ${uncited>0
+              ?'&nbsp;·&nbsp;<span style="color:var(--red)">'+uncited+' uncited stripped</span>'
+              :'&nbsp;·&nbsp;<span style="color:var(--green)">all claims cited ✓</span>'}
+          </span>
+          <span class="kv-key">Threshold</span>
+          <span class="kv-val">${r.rag_rerank_threshold||0.3} (gate fires below this)</span>
+        </div>
+        <div style="margin-top:10px">
+          <div style="font-size:10px;color:var(--text-3);margin-bottom:4px;letter-spacing:.06em;text-transform:uppercase">Rerank confidence</div>
+          <div style="height:8px;background:var(--surface-2);border-radius:4px;overflow:hidden;position:relative">
+            <div style="width:${Math.min(100,topScore*100)}%;height:100%;background:${scoreColor};border-radius:4px"></div>
+            <div style="position:absolute;top:0;left:30%;width:1px;height:100%;background:var(--border-2)" title="threshold"></div>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:9px;color:var(--text-3);margin-top:2px">
+            <span>0.0</span><span style="margin-left:28%">0.3 threshold</span><span>1.0</span>
+          </div>
+        </div>
+      </div>
+    </div>`;
 }
 
 function renderFeedbackSection(r) {
@@ -694,6 +773,7 @@ function openDetail(runId) {
 
     ${renderAgentSpans(r)}
     ${renderFeedbackSection(r)}
+    ${renderRagSection(r)}
 
     <div class="detail-section">
       <div class="ds-title">Question</div>

@@ -246,18 +246,6 @@ class TracerMiddleware(BaseAgentMiddleware):
         self._llm_timings[run_id] = []
 
         ctx = getattr(runtime, "context", None) or {}
-
-        # If agent_context passes an explicit run_id (unique per message),
-        # use it so the trace and feedback share the same DynamoDB key.
-        # Falls back to whatever _get_run_id() returns (thread_id) if not set.
-        if ctx.get("run_id"):
-            # Re-key the in-flight trace dicts to the new run_id
-            new_run_id = ctx["run_id"]
-            if run_id != new_run_id:
-                if run_id in self._t0:          self._t0[new_run_id]          = self._t0.pop(run_id)
-                if run_id in self._llm_timings: self._llm_timings[new_run_id] = self._llm_timings.pop(run_id)
-                run_id = new_run_id
-
         self._ctx[run_id] = {
             "user_id":    ctx.get("user_id",    "anonymous"),
             "session_id": ctx.get("session_id", "unknown"),
@@ -348,6 +336,14 @@ class TracerMiddleware(BaseAgentMiddleware):
                 if agent_spans:
                     trace["agent_spans"] = agent_spans
                     log.info(f"[TRACER] Collected {len(agent_spans)} sub-agent spans for run_id={run_id}")
+                    # Extract rag_metrics from any span that has them
+                    # (research agent forwards search_tool + summariser_tool metrics)
+                    for _span in agent_spans:
+                        if "rag_metrics" in _span:
+                            _rag = _span["rag_metrics"]
+                            for _k, _v in _rag.items():
+                                trace[f"rag_{_k}"] = _v
+                            log.info(f"[TRACER] RAG metrics extracted from {_span.get('agent')} span: {list(_rag.keys())}")
             except ImportError:
                 pass  # Not a Supervisor agent — no spans expected
 
@@ -571,11 +567,39 @@ class TracerMiddleware(BaseAgentMiddleware):
 
                 # Result — full for sub-agents and important tools
                 result_text = result.get("full_content", "")
+
+                # ── RAG pipeline JSON envelope parsing ──────────────────────
+                # search_tool and summariser_tool (MCP Lambda tools) return:
+                # {"chunks": "...", "rag_metrics": {...}}  (search)
+                # {"answer": "...", "rag_metrics": {...}}  (summariser)
+                # Parse regardless of is_sub_agent — MCP tools are NOT sub-agents.
+                import json as _json
+                _display_text = result_text
+                log.info(f"[TRACER] tool_result  name={tc_name!r}  is_sub_agent={is_sub_agent}  text_len={len(result_text)}  preview={result_text[:120]!r}")
+                try:
+                    _envelope = _json.loads(result_text)
+                    if isinstance(_envelope, dict) and "rag_metrics" in _envelope:
+                        _rag = _envelope.get("rag_metrics", {})
+                        log.info(f"[TRACER] RAG envelope detected  tool={tc_name!r}  metrics={_rag}")
+                        TracerMiddleware.update_trace(
+                            run_id,
+                            {f"rag_{_k}": _v for _k, _v in _rag.items()}
+                        )
+                        _display_text = (
+                            _envelope.get("chunks")
+                            or _envelope.get("answer")
+                            or result_text
+                        )
+                    else:
+                        log.info(f"[TRACER] No rag_metrics in envelope  keys={list(_envelope.keys()) if isinstance(_envelope, dict) else type(_envelope)!r}")
+                except (ValueError, TypeError) as _je:
+                    log.info(f"[TRACER] Not JSON  tool={tc_name!r}  err={_je}")
+
                 if is_sub_agent:
-                    tool_detail["response"]        = result_text   # full sub-agent answer
-                    tool_detail["response_length"] = len(result_text)
+                    tool_detail["response"]        = _display_text
+                    tool_detail["response_length"] = len(_display_text)
                 else:
-                    tool_detail["result"] = result_text   # full result
+                    tool_detail["result"] = _display_text   # full result
 
                 tool_details.append(tool_detail)
 

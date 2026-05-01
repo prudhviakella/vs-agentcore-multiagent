@@ -220,8 +220,15 @@ def handler(event: dict, context) -> str:
         event["top_k"]  : int — ignored; we always use STAGE1_TOP_K for recall
 
     Output:
-        str — formatted chunks for the research agent LLM,
-              or INSUFFICIENT_CONTEXT sentinel
+        str — JSON envelope containing:
+            chunks            : formatted chunk text for the LLM
+            rag_metrics       : structured observability fields for the tracer
+                rerank_top_score      : float  — highest relevance score from Stage 2
+                rerank_threshold      : float  — threshold used (RERANK_THRESHOLD)
+                threshold_triggered   : bool   — true if confidence gate fired
+                chunks_stage1         : int    — candidates from Pinecone
+                chunks_stage2         : int    — chunks after reranking
+            or INSUFFICIENT_CONTEXT sentinel if confidence gate triggered
     """
     query  = event.get("query", "").strip()
     if not query:
@@ -232,28 +239,71 @@ def handler(event: dict, context) -> str:
     try:
         # Stage 1 — Broad recall
         chunks = _stage1_broad_recall(query)
+        chunks_stage1 = len(chunks)
         if not chunks:
             log.warning("[search] Stage 1 returned 0 chunks")
-            return INSUFFICIENT_CONTEXT
+            return json.dumps({
+                "chunks": INSUFFICIENT_CONTEXT,
+                "rag_metrics": {
+                    "rerank_top_score":    0.0,
+                    "rerank_threshold":    RERANK_THRESHOLD,
+                    "threshold_triggered": True,
+                    "chunks_stage1":       0,
+                    "chunks_stage2":       0,
+                }
+            })
 
         # Stage 2 — Rerank
         reranked, top_score = _stage2_rerank(query, chunks)
-        if not reranked:
-            return INSUFFICIENT_CONTEXT
+        chunks_stage2 = len(reranked)
 
         # Stage 4a — Confidence gate
-        if top_score < RERANK_THRESHOLD:
+        threshold_triggered = (not reranked) or (top_score < RERANK_THRESHOLD)
+        if threshold_triggered:
             log.warning(
                 f"[search] Confidence gate triggered: top_score={top_score:.3f} "
                 f"< threshold={RERANK_THRESHOLD}"
             )
-            return INSUFFICIENT_CONTEXT
+            return json.dumps({
+                "chunks": INSUFFICIENT_CONTEXT,
+                "rag_metrics": {
+                    "rerank_top_score":    round(top_score, 4),
+                    "rerank_threshold":    RERANK_THRESHOLD,
+                    "threshold_triggered": True,
+                    "chunks_stage1":       chunks_stage1,
+                    "chunks_stage2":       chunks_stage2,
+                }
+            })
 
-        # Format and return top chunks
+        # Format chunks for LLM
         formatted = "\n\n---\n\n".join(_format_chunk(c) for c in reranked)
-        log.info(f"[search] Returning {len(reranked)} chunks  top_score={top_score:.3f}")
-        return formatted
+
+        log.info(
+            f"[search] Done  chunks_s1={chunks_stage1}  chunks_s2={chunks_stage2}  "
+            f"top_score={top_score:.3f}"
+        )
+
+        return json.dumps({
+            "chunks": formatted,
+            "rag_metrics": {
+                "rerank_top_score":    round(top_score, 4),
+                "rerank_threshold":    RERANK_THRESHOLD,
+                "threshold_triggered": False,
+                "chunks_stage1":       chunks_stage1,
+                "chunks_stage2":       chunks_stage2,
+            }
+        })
 
     except Exception as exc:
         log.exception(f"[search] Pipeline error: {exc}")
-        return f"Error retrieving documents: {exc}"
+        return json.dumps({
+            "chunks": f"Error retrieving documents: {exc}",
+            "rag_metrics": {
+                "rerank_top_score":    0.0,
+                "rerank_threshold":    RERANK_THRESHOLD,
+                "threshold_triggered": False,
+                "chunks_stage1":       0,
+                "chunks_stage2":       0,
+                "error":               str(exc),
+            }
+        })

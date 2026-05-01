@@ -207,17 +207,34 @@ def handler(event: dict, context) -> str:
         event["query"]  : str       — original research query
 
     Output:
-        str — grounded answer with [Source: NCT_ID] citations on every claim
+        str — JSON envelope containing:
+            answer          : grounded answer with [Source: NCT_ID] citations
+            rag_metrics     : structured observability fields for the tracer
+                chunks_input          : int   — chunks received from search_tool
+                chunks_compressed     : int   — chunks retained after Stage 3
+                compression_ratio     : float — chunks_compressed / chunks_input
+                uncited_claims_stripped: int  — factual claims stripped in Stage 4b
+                citation_coverage     : float — 1.0 = fully cited, < 1.0 = partial
+                total_tokens_before   : int   — approx tokens before compression
+                total_tokens_after    : int   — approx tokens after compression
     """
     chunks = event.get("chunks", [])
     query  = event.get("query", "").strip()
 
     if not chunks:
-        return "No context provided. Cannot answer without retrieved documents."
+        return json.dumps({
+            "answer": "No context provided. Cannot answer without retrieved documents.",
+            "rag_metrics": {"chunks_input": 0, "chunks_compressed": 0}
+        })
     if not query:
-        return "No query provided."
+        return json.dumps({
+            "answer": "No query provided.",
+            "rag_metrics": {"chunks_input": len(chunks), "chunks_compressed": 0}
+        })
 
-    log.info(f"[summariser] Query: {query[:100]}  chunks={len(chunks)}")
+    chunks_input = len(chunks)
+    tokens_before = sum(len(c.split()) for c in chunks)
+    log.info(f"[summariser] Query: {query[:100]}  chunks={chunks_input}  tokens_before≈{tokens_before}")
 
     try:
         from openai import OpenAI
@@ -225,27 +242,82 @@ def handler(event: dict, context) -> str:
 
         # Stage 3 — Context compression
         compressed = _stage3_compress(chunks, query, client)
+        chunks_compressed = len(compressed)
+        tokens_after = sum(len(c.split()) for c in compressed)
+        compression_ratio = round(chunks_compressed / chunks_input, 3) if chunks_input else 0.0
+
         if not compressed:
             log.warning("[summariser] All chunks were NOT_RELEVANT after compression")
-            return (
-                "I don't have enough specific information in the knowledge base "
-                "to answer this question accurately."
-            )
+            return json.dumps({
+                "answer": (
+                    "I don't have enough specific information in the knowledge base "
+                    "to answer this question accurately."
+                ),
+                "rag_metrics": {
+                    "chunks_input":           chunks_input,
+                    "chunks_compressed":      0,
+                    "compression_ratio":      0.0,
+                    "total_tokens_before":    tokens_before,
+                    "total_tokens_after":     0,
+                    "uncited_claims_stripped": 0,
+                    "citation_coverage":      0.0,
+                }
+            })
 
         # Stage 4b — Synthesise with forced citation
         answer = _stage4b_synthesise(compressed, query, client)
 
-        # Validate citations — strip uncited factual claims
-        validated = _validate_citations(answer)
-        if not validated:
-            return (
-                "I was unable to produce a properly grounded answer from the "
-                "available context. All retrieved information lacked verifiable citations."
-            )
+        # Validate citations — strip uncited factual claims and count them
+        sentences_before = len(re.split(r'(?<=[.!?])\s+', answer))
+        validated        = _validate_citations(answer)
+        sentences_after  = len(re.split(r'(?<=[.!?])\s+', validated)) if validated else 0
+        uncited_stripped = max(0, sentences_before - sentences_after)
+        citation_coverage = round(sentences_after / sentences_before, 3) if sentences_before else 1.0
 
-        log.info(f"[summariser] Answer length: {len(validated)} chars")
-        return validated
+        if not validated:
+            return json.dumps({
+                "answer": (
+                    "I was unable to produce a properly grounded answer from the "
+                    "available context. All retrieved information lacked verifiable citations."
+                ),
+                "rag_metrics": {
+                    "chunks_input":            chunks_input,
+                    "chunks_compressed":       chunks_compressed,
+                    "compression_ratio":       compression_ratio,
+                    "total_tokens_before":     tokens_before,
+                    "total_tokens_after":      tokens_after,
+                    "uncited_claims_stripped": uncited_stripped,
+                    "citation_coverage":       0.0,
+                }
+            })
+
+        log.info(
+            f"[summariser] Done  compressed={chunks_compressed}/{chunks_input}  "
+            f"ratio={compression_ratio}  uncited_stripped={uncited_stripped}  "
+            f"citation_coverage={citation_coverage}"
+        )
+
+        return json.dumps({
+            "answer": validated,
+            "rag_metrics": {
+                "chunks_input":            chunks_input,
+                "chunks_compressed":       chunks_compressed,
+                "compression_ratio":       compression_ratio,
+                "total_tokens_before":     tokens_before,
+                "total_tokens_after":      tokens_after,
+                "uncited_claims_stripped": uncited_stripped,
+                "citation_coverage":       citation_coverage,
+            }
+        })
 
     except Exception as exc:
         log.exception(f"[summariser] Pipeline error: {exc}")
-        return f"Error synthesising answer: {exc}"
+        return json.dumps({
+            "answer": f"Error synthesising answer: {exc}",
+            "rag_metrics": {
+                "chunks_input":       chunks_input,
+                "chunks_compressed":  0,
+                "compression_ratio":  0.0,
+                "error":              str(exc),
+            }
+        })

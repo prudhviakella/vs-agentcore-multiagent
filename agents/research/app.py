@@ -143,6 +143,8 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
             return safe
         return ""
 
+    _rag_metrics: dict = {}  # accumulated from search_tool/summariser_tool JSON envelopes
+
     try:
         agent     = await _ensure_agent()
         thread_id = session_id or f"research-{time.time()}"
@@ -208,10 +210,11 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
     log.info(f"[Research] Done  latency_ms={elapsed}  answer_len={len(full_answer)}")
 
     # Observability span — consumed by TracerMiddleware in Supervisor
-    yield {
-        "type": "span",
-        "data": {"agent": "research", "elapsed_ms": elapsed},
-    }
+    _span_data: dict = {"agent": "research", "elapsed_ms": elapsed}
+    if _rag_metrics:
+        _span_data["rag_metrics"] = _rag_metrics
+        log.info(f"[Research] Forwarding RAG metrics in span: {_rag_metrics}")
+    yield {"type": "span", "data": _span_data}
     yield {"type": "done", "latency_ms": elapsed, "answer": full_answer}
 
 
