@@ -218,8 +218,36 @@ def handler(event: dict, context) -> str:
                 total_tokens_before   : int   — approx tokens before compression
                 total_tokens_after    : int   — approx tokens after compression
     """
-    chunks = event.get("chunks", [])
-    query  = event.get("query", "").strip()
+    raw_chunks = event.get("chunks", [])
+    query      = event.get("query", "").strip()
+
+    # Normalise: accept either a string (full formatted text) or a list of strings.
+    # The research agent LLM passes the full chunks string from search_tool directly.
+    # Split on the separator we use in _format_chunk to recover individual chunks.
+    if isinstance(raw_chunks, str):
+        # Strip RAG_METRICS header if present (added by search_lambda for research_app.py)
+        _text = raw_chunks
+        if _text.startswith("RAG_METRICS:"):
+            _parts = _text.split("\n\n", 1)
+            _text = _parts[1] if len(_parts) > 1 else ""
+        chunks = [c.strip() for c in _text.split("\n\n---\n\n") if c.strip()]
+        log.info(f"[summariser] chunks received as string  split_count={len(chunks)}")
+    elif isinstance(raw_chunks, list):
+        # Flatten: each item may itself be a formatted multi-chunk string
+        chunks = []
+        for item in raw_chunks:
+            if isinstance(item, str):
+                _item = item
+                if _item.startswith("RAG_METRICS:"):
+                    _parts = _item.split("\n\n", 1)
+                    _item = _parts[1] if len(_parts) > 1 else ""
+                if "\n\n---\n\n" in _item:
+                    chunks.extend(c.strip() for c in _item.split("\n\n---\n\n") if c.strip())
+                elif _item.strip():
+                    chunks.append(_item.strip())
+        log.info(f"[summariser] chunks received as list  items={len(raw_chunks)}  after_split={len(chunks)}")
+    else:
+        chunks = []
 
     if not chunks:
         return json.dumps({

@@ -189,15 +189,11 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
                 log.info(f"[Research] ✓ {name}")
                 # Parse JSON envelope from search_tool / summariser_tool
                 _tool_output = data.get("output", "")
-                # Extract raw text from ToolMessage(content=[{'type':'text','text':'"{\"..."}'])
-                # MCP tools return ToolMessage with content as list of text blocks.
-                # The text value is a double-JSON-encoded string — json.dumps(json.dumps({...}))
-                # so we must parse twice: first to unwrap the outer string, then to get the dict.
+                # Extract text from ToolMessage(content=[{'type':'text','text':'...'}])
                 import json as _j
-                _raw = ""
                 try:
-                    # ToolMessage with list content (actual production shape)
                     _content = getattr(_tool_output, "content", _tool_output)
+                    _raw = ""
                     if isinstance(_content, list) and _content:
                         _block = _content[0]
                         if isinstance(_block, dict):
@@ -206,20 +202,27 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
                             _raw = _block
                     elif isinstance(_content, str):
                         _raw = _content
-                    # Strip outer quotes if double-encoded: '"{\"key\"...}"' → '{"key"...}'
+                    # Unwrap double-encoded string if needed
                     _raw = _raw.strip()
                     if _raw.startswith('"') and _raw.endswith('"'):
-                        _raw = _j.loads(_raw)  # unwrap outer string
+                        try:
+                            _raw = _j.loads(_raw)
+                        except Exception:
+                            pass
                     _raw = _raw.strip() if isinstance(_raw, str) else ""
-                    if _raw.startswith("{"):
-                        _env = _j.loads(_raw)
-                        if isinstance(_env, dict) and "rag_metrics" in _env:
-                            _rag_metrics.update(_env["rag_metrics"])
-                            log.info(f"[Research] RAG metrics captured from {name}: {_env['rag_metrics']}")
-                        else:
-                            log.info(f"[Research] JSON parsed, no rag_metrics  keys={list(_env.keys()) if isinstance(_env,dict) else '?'}")
+
+                    # New format: "RAG_METRICS:{...}\n\n<chunks text>"
+                    if _raw.startswith("RAG_METRICS:"):
+                        _lines = _raw.split("\n\n", 1)
+                        _metrics_str = _lines[0][len("RAG_METRICS:"):]
+                        try:
+                            _metrics = _j.loads(_metrics_str)
+                            _rag_metrics.update(_metrics)
+                            log.info(f"[Research] RAG metrics from {name}: {_metrics}")
+                        except Exception as _je:
+                            log.info(f"[Research] RAG_METRICS parse error: {_je}")
                     else:
-                        log.info(f"[Research] Not JSON envelope for {name}")
+                        log.info(f"[Research] No RAG_METRICS header in {name} output")
                 except Exception as _je:
                     log.info(f"[Research] tool output parse error: {_je}")
                 yield {"type": "tool_end", "name": name}
