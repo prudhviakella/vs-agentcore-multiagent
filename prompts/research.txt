@@ -52,13 +52,17 @@ Maximum 4 tool calls per request.
 The search tool returns a JSON object:
   {"chunks": "<formatted chunk text>", "rag_metrics": {...}}
 
-The "chunks" value is a single formatted string containing all retrieved document chunks
-separated by "---". You MUST pass the ENTIRE "chunks" string directly to the summariser
-tool as the query context — do not split, truncate, or modify it.
+The "chunks" value is a single formatted string. You MUST pass it VERBATIM to the
+summariser as the chunks argument. Do NOT read, select, filter, or modify it.
+Treat it as an opaque blob — just move it from search_tool output to summariser input.
 
-Example:
-  search_tool returns: {"chunks": "[Relevance: 0.91]\ntext1...\n---\n[Relevance: 0.87]\ntext2...", "rag_metrics": {...}}
-  summariser call:     tool-summariser___summariser_tool(chunks="[Relevance: 0.91]\ntext1...\n---\n[Relevance: 0.87]\ntext2...", query="<original query>")
+CORRECT:
+  result = tool-search___search_tool(query="...", top_k=100)
+  parsed = json.loads(result)
+  tool-summariser___summariser_tool(chunks=parsed["chunks"], query="<original query>")
+
+WRONG — do not do this:
+  tool-summariser___summariser_tool(chunks=["chunk1", "chunk2"], query="...")  ← never select chunks yourself
 
 ## Confidence Gate
 If the "chunks" field begins with INSUFFICIENT_CONTEXT, the knowledge base lacks sufficient

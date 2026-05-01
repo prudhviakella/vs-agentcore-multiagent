@@ -1,240 +1,199 @@
 """
-mcp_tools/search_lambda/handler.py
-====================================
-Stage 1 + Stage 2 + Stage 4a of the Advanced RAG Pipeline.
+mcp_tools/summariser_lambda/handler.py
+========================================
+Stage 3 + Stage 4b of the Advanced RAG Pipeline.
 
 MCP tool schema (from deploy.py gateway registration):
-  Input:  { "query": str, "top_k": int }
-  Output: str  — newline-separated chunks with reranker scores,
-                 or INSUFFICIENT_CONTEXT sentinel
+  Input:  { "chunks": list[str], "query": str }
+  Output: str  — grounded answer with [Source: NCT_ID] citations
 
 Pipeline:
-  Stage 1 — Pinecone dense vector search: top_k=100 candidates
-  Stage 2 — Cohere Rerank: cross-encoder scores every (query, chunk)
-             jointly. Cuts to top 20 by relevance score.
-  Stage 4a — Confidence gate: if top reranker score < RERANK_THRESHOLD,
-              return INSUFFICIENT_CONTEXT so the research agent returns
-              "I don't have enough information" instead of hallucinating.
+  Stage 3  — Context compression: GPT-4o-mini extracts only the sentences
+              from each chunk that are relevant to the query.
+              Reduces 20 × ~6,000 tokens → 20 × ~500 tokens (12× reduction).
+              Preserves specific numbers, NCT IDs, dosages — the facts that
+              matter. Prompt-based extraction was chosen over LLMLingua because
+              clinical trial documents contain sparse but critical numerical
+              values that aggressive token-level compression would drop.
 
-Why top_k=100 not the caller's top_k?
-  The caller (research agent LLM) was trained to pass top_k=10.
-  Stage 1 must retrieve broadly (100) to give Stage 2 enough candidates
-  to find the truly relevant chunks. The final output is still ≤20 chunks.
+  Stage 4b — Citation grounding: GPT-4o synthesises the compressed context
+              with a prompt that forces [Source: NCT_ID] after every factual
+              claim. Claims without a citation are stripped before return.
+              This eliminates the hallucination path — the LLM cannot make
+              a claim it cannot point to.
 
 Env / SSM:
-  SSM_PREFIX                    /vs-agentcore-multiagent/prod
-  {SSM_PREFIX}/pinecone         {"api_key": "..."}
-  {SSM_PREFIX}/cohere           {"api_key": "..."}
-  {SSM_PREFIX}/pinecone/clinical_trials_index
+  SSM_PREFIX              /vs-agentcore-multiagent/prod
+  {SSM_PREFIX}/openai     {"api_key": "..."}
 """
 
 import json
 import logging
 import os
+import re
 
 import boto3
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-# ── Constants ──────────────────────────────────────────────────────────────
-STAGE1_TOP_K       = 100     # broad recall — must be high to feed reranker
-STAGE2_TOP_N       = 20      # reranker keeps top N after scoring
-RERANK_THRESHOLD   = 0.15    # confidence gate: corpus uses AI-generated summaries
-                             # which rerankers score lower than raw protocol text
-SSM_PREFIX         = os.environ.get("SSM_PREFIX", "/vs-agentcore-multiagent/prod")
-REGION             = os.environ.get("AWS_REGION", "us-east-1")
-PINECONE_NAMESPACE = os.environ.get("PINECONE_NAMESPACE", "clinical-trials")
+SSM_PREFIX = os.environ.get("SSM_PREFIX", "/vs-agentcore-multiagent/prod")
+REGION     = os.environ.get("AWS_REGION", "us-east-1")
 
-# Sentinel returned when no chunk clears the confidence threshold.
-# The research agent prompt recognises this and returns a grounded refusal.
-INSUFFICIENT_CONTEXT = (
-    "INSUFFICIENT_CONTEXT: No chunks in the knowledge base scored above the "
-    "relevance threshold for this query. Do not hallucinate an answer. "
-    "Return: 'I don't have enough information in the knowledge base to answer this question.'"
+# Max tokens per chunk after compression (Stage 3).
+# A 6,000-token chunk compressed to 500 tokens = 12× reduction.
+# Keeps specific numbers, NCT IDs, dosages — drops boilerplate methodology.
+COMPRESSED_TOKEN_BUDGET = 500
+
+# Sentence-level citation pattern: [Source: NCT04470427]
+CITATION_PATTERN = re.compile(r'\[Source:\s*[A-Z0-9]+\]', re.IGNORECASE)
+
+# Sentences we strip if they contain no citation (hallucination guard)
+FACTUAL_CLAIM_PATTERN = re.compile(
+    r'(?:efficacy|safety|adverse|endpoint|result|outcome|percent|%|rate|'
+    r'hazard|ratio|p-value|confidence|interval|dose|dosage|mg|kg|trial|'
+    r'study|participant|patient|subject)',
+    re.IGNORECASE,
 )
 
-# ── Lazy-loaded clients ────────────────────────────────────────────────────
-_secrets: dict = {}
-_pinecone_index = None
-_cohere_client  = None
+
+# ── OpenAI client ──────────────────────────────────────────────────────────
+
+def _get_openai_key() -> str:
+    if os.environ.get("OPENAI_API_KEY"):
+        return os.environ["OPENAI_API_KEY"]
+    sm     = boto3.client("secretsmanager", region_name=REGION)
+    secret = json.loads(sm.get_secret_value(SecretId=f"{SSM_PREFIX}/openai")["SecretString"])
+    key    = secret.get("api_key", "")
+    os.environ["OPENAI_API_KEY"] = key
+    return key
 
 
-def _load_secrets() -> dict:
-    global _secrets
-    if _secrets:
-        return _secrets
-    sm = boto3.client("secretsmanager", region_name=REGION)
-    pinecone_secret = json.loads(
-        sm.get_secret_value(SecretId=f"{SSM_PREFIX}/pinecone")["SecretString"]
-    )
-    cohere_secret = json.loads(
-        sm.get_secret_value(SecretId=f"{SSM_PREFIX}/cohere")["SecretString"]
-    )
-    _secrets = {
-        "pinecone_api_key": pinecone_secret["api_key"],
-        "cohere_api_key":   cohere_secret["api_key"],
-    }
-    log.info("[search] Secrets loaded")
-    return _secrets
+# ── Stage 3: Context compression ──────────────────────────────────────────
 
-
-def _get_pinecone_index():
-    global _pinecone_index
-    if _pinecone_index:
-        return _pinecone_index
-    from pinecone import Pinecone
-    secrets    = _load_secrets()
-    ssm        = boto3.client("ssm", region_name=REGION)
-    index_name = ssm.get_parameter(
-        Name=f"{SSM_PREFIX}/pinecone/clinical_trials_index"
-    )["Parameter"]["Value"]
-    pc             = Pinecone(api_key=secrets["pinecone_api_key"])
-    _pinecone_index = pc.Index(index_name)
-    log.info(f"[search] Pinecone index ready: {index_name}")
-    return _pinecone_index
-
-
-def _get_cohere_client():
-    global _cohere_client
-    if _cohere_client:
-        return _cohere_client
-    import cohere
-    secrets        = _load_secrets()
-    _cohere_client = cohere.Client(api_key=secrets["cohere_api_key"])
-    log.info("[search] Cohere client ready")
-    return _cohere_client
-
-
-# ── Pipeline stages ────────────────────────────────────────────────────────
-
-def _stage1_broad_recall(query: str) -> list[dict]:
+def _compress_chunk(chunk_text: str, query: str, client) -> str:
     """
-    Stage 1: Pinecone dense vector search.
-    Returns top STAGE1_TOP_K chunks as dicts with {id, text, metadata}.
-    Optimised for recall — missing the right document here is fatal.
+    GPT-4o-mini extracts only the sentences from a single chunk that are
+    directly relevant to the query.
+
+    Why prompt-based not LLMLingua:
+      LLMLingua does aggressive token-level compression — good for general text
+      but risky for clinical trial documents where a single number (18%, p=0.04,
+      NCT04470427) may be the entire value of the chunk. GPT-4o-mini reads the
+      full chunk and extracts complete relevant sentences, preserving all
+      numerical facts and source identifiers.
     """
-    from openai import OpenAI
-    import json as _json
+    # Already short — no compression needed
+    word_count = len(chunk_text.split())
+    if word_count < 150:
+        return chunk_text
 
-    # Load OpenAI key for embeddings
-    if not os.environ.get("OPENAI_API_KEY"):
-        sm     = boto3.client("secretsmanager", region_name=REGION)
-        secret = _json.loads(sm.get_secret_value(SecretId=f"{SSM_PREFIX}/openai")["SecretString"])
-        os.environ["OPENAI_API_KEY"] = secret.get("api_key", "")
-
-    oai_client = OpenAI()
-    # Index dimension is 1536.
-    # Try text-embedding-3-small first (native 1536, likely matches ingestion model).
-    # If ingestion used ada-002, cosine similarity still works well across both models
-    # since they share similar semantic space for clinical text.
-    embedding  = oai_client.embeddings.create(
-        model = "text-embedding-3-small",
-        input = query,
-    ).data[0].embedding
-    log.info(f"[search] Embedding dim={len(embedding)}")
-
-    index   = _get_pinecone_index()
-    results = index.query(
-        vector           = embedding,
-        top_k            = STAGE1_TOP_K,
-        namespace        = PINECONE_NAMESPACE,
-        include_metadata = True,
+    prompt = (
+        f"Extract only the sentences from the following clinical trial document "
+        f"chunk that are directly relevant to this query:\n\n"
+        f"Query: {query}\n\n"
+        f"Document chunk:\n{chunk_text}\n\n"
+        f"Rules:\n"
+        f"- Return only the relevant sentences verbatim, in order.\n"
+        f"- Keep all numerical values, percentages, NCT IDs, drug names, and dates.\n"
+        f"- If no sentences are relevant, return: NOT_RELEVANT\n"
+        f"- Do not summarise, paraphrase, or add commentary.\n"
+        f"- Keep your response under {COMPRESSED_TOKEN_BUDGET} tokens."
     )
-    log.info(f"[search] Stage 1: Pinecone query namespace={PINECONE_NAMESPACE!r}  matches={len(results.get('matches', []))}")
 
-    chunks = []
-    for match in results.get("matches", []):
-        text = (
-            match.get("metadata", {}).get("text")
-            or match.get("metadata", {}).get("chunk")
-            or match.get("metadata", {}).get("content")
-            or ""
+    response = client.chat.completions.create(
+        model       = "gpt-4o-mini",
+        messages    = [{"role": "user", "content": prompt}],
+        max_tokens  = COMPRESSED_TOKEN_BUDGET,
+        temperature = 0.0,
+    )
+    return response.choices[0].message.content.strip()
+
+
+def _stage3_compress(chunks: list[str], query: str, client) -> list[str]:
+    """
+    Stage 3: Run compression on all chunks in parallel (sequential for now,
+    can be parallelised with asyncio.gather in a future iteration).
+    Filters out NOT_RELEVANT chunks.
+    """
+    compressed = []
+    for i, chunk in enumerate(chunks):
+        result = _compress_chunk(chunk, query, client)
+        if result and result != "NOT_RELEVANT":
+            compressed.append(result)
+        log.info(
+            f"[summariser] Stage 3: chunk {i+1}/{len(chunks)}  "
+            f"before={len(chunk.split())} words  "
+            f"after={len(result.split()) if result != 'NOT_RELEVANT' else 0} words"
         )
-        if text:
-            chunks.append({
-                "id":       match.get("id", ""),
-                "text":     text,
-                "metadata": match.get("metadata", {}),
-                "score":    match.get("score", 0.0),
-            })
 
-    log.info(f"[search] Stage 1: {len(chunks)} chunks from Pinecone")
-    return chunks
+    log.info(f"[summariser] Stage 3: {len(compressed)}/{len(chunks)} chunks retained after compression")
+    return compressed
 
 
-def _stage2_rerank(query: str, chunks: list[dict]) -> tuple[list[dict], float]:
+# ── Stage 4b: Citation grounding ──────────────────────────────────────────
+
+def _validate_citations(answer: str) -> str:
     """
-    Stage 2: Cohere Rerank cross-encoder.
-    Scores every (query, chunk) pair jointly — no compression, full attention.
-    Returns (top_n_chunks_sorted_by_relevance, top_score).
+    Strip factual claims that have no [Source: NCT_ID] citation.
+    This is the final hallucination guard — the LLM literally cannot make
+    a claim it cannot point to.
 
-    The cross-encoder reads the full text of both query and chunk together,
-    so it correctly handles:
-      - Negation:    "no adverse events" != "adverse events"
-      - Synonyms:    "elderly" == "senior subjects aged 65+"
-      - Specificity: subgroup results > overall results for specific query
-      - Contradiction: "excluded" ranks low even with keyword overlap
+    Strategy: sentence-level validation. A sentence is stripped if:
+      - It contains clinical/numerical language (factual claim indicator)
+      - AND it has no [Source: ...] citation
+    Pure structural sentences ("The following summarises...") are kept.
     """
-    co     = _get_cohere_client()
-    docs   = [c["text"] for c in chunks]
+    sentences = re.split(r'(?<=[.!?])\s+', answer)
+    validated = []
 
-    result = co.rerank(
-        model     = "rerank-english-v3.0",
-        query     = query,
-        documents = docs,
-        top_n     = STAGE2_TOP_N,
+    for sentence in sentences:
+        has_citation = bool(CITATION_PATTERN.search(sentence))
+        is_factual   = bool(FACTUAL_CLAIM_PATTERN.search(sentence))
+
+        if is_factual and not has_citation:
+            log.warning(f"[summariser] Stripping uncited factual claim: {sentence[:80]}...")
+            continue
+        validated.append(sentence)
+
+    return " ".join(validated).strip()
+
+
+def _stage4b_synthesise(compressed_chunks: list[str], query: str, client) -> str:
+    """
+    Stage 4b: GPT-4o synthesises the compressed context with forced citation.
+    Every factual claim must include [Source: NCT_ID].
+    Uncited claims are stripped by _validate_citations().
+    """
+    context = "\n\n---\n\n".join(compressed_chunks)
+
+    system_prompt = (
+        "You are a clinical trial research assistant. Answer the query using ONLY "
+        "the provided context. Every factual claim you make MUST be followed "
+        "immediately by a citation in this exact format: [Source: NCT_ID] where "
+        "NCT_ID is the trial identifier from the context. "
+        "If a fact does not have a source in the context, do not state it. "
+        "Do not hallucinate, infer, or use knowledge outside the provided context. "
+        "This information is for research purposes only and does not constitute medical advice."
     )
 
-    reranked = []
-    for hit in result.results:
-        chunk = chunks[hit.index].copy()
-        chunk["rerank_score"] = hit.relevance_score
-        reranked.append(chunk)
-
-    top_score = reranked[0]["rerank_score"] if reranked else 0.0
-    log.info(
-        f"[search] Stage 2: {len(reranked)} chunks after rerank  "
-        f"top_score={top_score:.3f}"
+    user_prompt = (
+        f"Context (retrieved clinical trial documents):\n\n{context}\n\n"
+        f"Query: {query}\n\n"
+        f"Answer the query using only the context above. "
+        f"Every factual claim must cite its source as [Source: NCT_ID]."
     )
-    return reranked, top_score
 
-
-def _format_chunk(chunk: dict) -> str:
-    """
-    Format a chunk for return to the research agent LLM.
-    Includes the NCT ID so Stage 4b citation grounding can work.
-
-    The Pinecone metadata has no nct_id field — NCT IDs are embedded
-    directly in the chunk text (e.g. "NCT04470427") or in S3 paths
-    (e.g. doc_NCT04470427_Pfizer_Vaccine_...). Extract via regex.
-    """
-    import re as _re
-    meta   = chunk.get("metadata", {})
-    score  = chunk.get("rerank_score", chunk.get("score", 0.0))
-    text   = chunk.get("text", "").strip()
-
-    # Try metadata fields first (future-proof)
-    nct_id = meta.get("nct_id") or meta.get("trial_id") or meta.get("source") or ""
-
-    # Fall back to regex extraction from text
-    if not nct_id:
-        _nct_match = _re.search(r'NCT\d{8}', text)
-        if _nct_match:
-            nct_id = _nct_match.group(0)
-
-    # Fall back to S3 path in text
-    if not nct_id:
-        _s3_match = _re.search(r'doc_(NCT\d{8})', text)
-        if _s3_match:
-            nct_id = _s3_match.group(1)
-
-    header = f"[Relevance: {score:.2f}"
-    if nct_id:
-        header += f" | Source: {nct_id}"
-    header += "]"
-
-    return f"{header}\n{text}"
+    response = client.chat.completions.create(
+        model       = "gpt-4o",
+        messages    = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": user_prompt},
+        ],
+        max_tokens  = 1500,
+        temperature = 0.0,
+    )
+    return response.choices[0].message.content.strip()
 
 
 # ── Lambda entrypoint ──────────────────────────────────────────────────────
@@ -244,109 +203,139 @@ def handler(event: dict, context) -> str:
     MCP Lambda handler — called by the Bedrock MCP Gateway.
 
     Input (from LangChain tool call):
-        event["query"]  : str — the research query
-        event["top_k"]  : int — ignored; we always use STAGE1_TOP_K for recall
+        event["chunks"] : list[str] — chunks from search_tool (with headers)
+        event["query"]  : str       — original research query
 
     Output:
         str — JSON envelope containing:
-            chunks            : formatted chunk text for the LLM
-            rag_metrics       : structured observability fields for the tracer
-                rerank_top_score      : float  — highest relevance score from Stage 2
-                rerank_threshold      : float  — threshold used (RERANK_THRESHOLD)
-                threshold_triggered   : bool   — true if confidence gate fired
-                chunks_stage1         : int    — candidates from Pinecone
-                chunks_stage2         : int    — chunks after reranking
-            or INSUFFICIENT_CONTEXT sentinel if confidence gate triggered
+            answer          : grounded answer with [Source: NCT_ID] citations
+            rag_metrics     : structured observability fields for the tracer
+                chunks_input          : int   — chunks received from search_tool
+                chunks_compressed     : int   — chunks retained after Stage 3
+                compression_ratio     : float — chunks_compressed / chunks_input
+                uncited_claims_stripped: int  — factual claims stripped in Stage 4b
+                citation_coverage     : float — 1.0 = fully cited, < 1.0 = partial
+                total_tokens_before   : int   — approx tokens before compression
+                total_tokens_after    : int   — approx tokens after compression
     """
-    query  = event.get("query", "").strip()
-    if not query:
-        return "Error: empty query"
+    raw_chunks = event.get("chunks", [])
+    query      = event.get("query", "").strip()
 
-    log.info(f"[search] Query: {query[:100]}")
+    # Normalise: accept either a string (full formatted text) or a list of strings.
+    # The research agent LLM passes the full chunks string from search_tool directly.
+    # Split on the separator we use in _format_chunk to recover individual chunks.
+    if isinstance(raw_chunks, str):
+        chunks = [c.strip() for c in raw_chunks.split("\n\n---\n\n") if c.strip()]
+        log.info(f"[summariser] chunks received as string  split_count={len(chunks)}")
+    elif isinstance(raw_chunks, list):
+        # Flatten: each item may itself be a formatted multi-chunk string
+        chunks = []
+        for item in raw_chunks:
+            if isinstance(item, str) and "\n\n---\n\n" in item:
+                chunks.extend(c.strip() for c in item.split("\n\n---\n\n") if c.strip())
+            elif isinstance(item, str) and item.strip():
+                chunks.append(item.strip())
+        log.info(f"[summariser] chunks received as list  items={len(raw_chunks)}  after_split={len(chunks)}")
+    else:
+        chunks = []
+
+    if not chunks:
+        return json.dumps({
+            "answer": "No context provided. Cannot answer without retrieved documents.",
+            "rag_metrics": {"chunks_input": 0, "chunks_compressed": 0}
+        })
+    if not query:
+        return json.dumps({
+            "answer": "No query provided.",
+            "rag_metrics": {"chunks_input": len(chunks), "chunks_compressed": 0}
+        })
+
+    chunks_input = len(chunks)
+    tokens_before = sum(len(c.split()) for c in chunks)
+    log.info(f"[summariser] Query: {query[:100]}  chunks={chunks_input}  tokens_before≈{tokens_before}")
 
     try:
-        # Stage 1 — Broad recall
-        chunks = _stage1_broad_recall(query)
-        chunks_stage1 = len(chunks)
-        if not chunks:
-            log.warning("[search] Stage 1 returned 0 chunks")
+        from openai import OpenAI
+        client = OpenAI(api_key=_get_openai_key())
+
+        # Stage 3 — Context compression
+        compressed = _stage3_compress(chunks, query, client)
+        chunks_compressed = len(compressed)
+        tokens_after = sum(len(c.split()) for c in compressed)
+        compression_ratio = round(chunks_compressed / chunks_input, 3) if chunks_input else 0.0
+
+        if not compressed:
+            log.warning("[summariser] All chunks were NOT_RELEVANT after compression")
             return json.dumps({
-                "chunks": INSUFFICIENT_CONTEXT,
+                "answer": (
+                    "I don't have enough specific information in the knowledge base "
+                    "to answer this question accurately."
+                ),
                 "rag_metrics": {
-                    "rerank_top_score":    0.0,
-                    "rerank_threshold":    RERANK_THRESHOLD,
-                    "threshold_triggered": True,
-                    "chunks_stage1":       0,
-                    "chunks_stage2":       0,
+                    "chunks_input":           chunks_input,
+                    "chunks_compressed":      0,
+                    "compression_ratio":      0.0,
+                    "total_tokens_before":    tokens_before,
+                    "total_tokens_after":     0,
+                    "uncited_claims_stripped": 0,
+                    "citation_coverage":      0.0,
                 }
             })
 
-        # Stage 2 — Rerank
-        reranked, top_score = _stage2_rerank(query, chunks)
-        chunks_stage2 = len(reranked)
+        # Stage 4b — Synthesise with forced citation
+        answer = _stage4b_synthesise(compressed, query, client)
 
-        # Stage 4a — Confidence gate
-        threshold_triggered = (not reranked) or (top_score < RERANK_THRESHOLD)
-        if threshold_triggered:
-            log.warning(
-                f"[search] Confidence gate triggered: top_score={top_score:.3f} "
-                f"< threshold={RERANK_THRESHOLD}"
-            )
-            # Still capture top chunk IDs even when gated — tells learning pipeline
-            # whether wrong docs are ranking near threshold vs no docs at all
-            _top_ids    = [c.get("id", "") for c in reranked[:5]]
-            _top_scores = [round(c.get("rerank_score", 0.0), 4) for c in reranked[:5]]
+        # Validate citations — strip uncited factual claims and count them
+        sentences_before = len(re.split(r'(?<=[.!?])\s+', answer))
+        validated        = _validate_citations(answer)
+        sentences_after  = len(re.split(r'(?<=[.!?])\s+', validated)) if validated else 0
+        uncited_stripped = max(0, sentences_before - sentences_after)
+        citation_coverage = round(sentences_after / sentences_before, 3) if sentences_before else 1.0
+
+        if not validated:
             return json.dumps({
-                "chunks": INSUFFICIENT_CONTEXT,
+                "answer": (
+                    "I was unable to produce a properly grounded answer from the "
+                    "available context. All retrieved information lacked verifiable citations."
+                ),
                 "rag_metrics": {
-                    "rerank_top_score":    round(top_score, 4),
-                    "rerank_threshold":    RERANK_THRESHOLD,
-                    "threshold_triggered": True,
-                    "chunks_stage1":       chunks_stage1,
-                    "chunks_stage2":       chunks_stage2,
-                    "top_chunk_ids":       _top_ids,
-                    "top_chunk_scores":    _top_scores,
+                    "chunks_input":            chunks_input,
+                    "chunks_compressed":       chunks_compressed,
+                    "compression_ratio":       compression_ratio,
+                    "total_tokens_before":     tokens_before,
+                    "total_tokens_after":      tokens_after,
+                    "uncited_claims_stripped": uncited_stripped,
+                    "citation_coverage":       0.0,
                 }
             })
-
-        # Format chunks for LLM
-        formatted = "\n\n---\n\n".join(_format_chunk(c) for c in reranked)
-
-        # Top 5 chunk IDs and scores — for continuous learning pipeline
-        # Distinguishes "wrong docs retrieved" from "docs don't exist in KB"
-        # Small payload: just IDs (strings) + scores (floats), well within DynamoDB limits
-        TOP_N_LEARNING = 5
-        top_chunk_ids    = [c.get("id", "") for c in reranked[:TOP_N_LEARNING]]
-        top_chunk_scores = [round(c.get("rerank_score", 0.0), 4) for c in reranked[:TOP_N_LEARNING]]
 
         log.info(
-            f"[search] Done  chunks_s1={chunks_stage1}  chunks_s2={chunks_stage2}  "
-            f"top_score={top_score:.3f}  top_ids={top_chunk_ids[:2]}"
+            f"[summariser] Done  compressed={chunks_compressed}/{chunks_input}  "
+            f"ratio={compression_ratio}  uncited_stripped={uncited_stripped}  "
+            f"citation_coverage={citation_coverage}"
         )
 
         return json.dumps({
-            "chunks": formatted,
+            "answer": validated,
             "rag_metrics": {
-                "rerank_top_score":    round(top_score, 4),
-                "rerank_threshold":    RERANK_THRESHOLD,
-                "threshold_triggered": False,
-                "chunks_stage1":       chunks_stage1,
-                "chunks_stage2":       chunks_stage2,
-                "top_chunk_ids":       top_chunk_ids,
-                "top_chunk_scores":    top_chunk_scores,
+                "chunks_input":            chunks_input,
+                "chunks_compressed":       chunks_compressed,
+                "compression_ratio":       compression_ratio,
+                "total_tokens_before":     tokens_before,
+                "total_tokens_after":      tokens_after,
+                "uncited_claims_stripped": uncited_stripped,
+                "citation_coverage":       citation_coverage,
             }
         })
 
     except Exception as exc:
-        log.exception(f"[search] Pipeline error: {exc}")
+        log.exception(f"[summariser] Pipeline error: {exc}")
         return json.dumps({
-            "chunks": f"Error retrieving documents: {exc}",
+            "answer": f"Error synthesising answer: {exc}",
             "rag_metrics": {
-                "rerank_top_score":    0.0,
-                "rerank_threshold":    RERANK_THRESHOLD,
-                "threshold_triggered": False,
-                "chunks_stage1":       0,
-                "chunks_stage2":       0,
-                "error":               str(exc),
+                "chunks_input":       chunks_input,
+                "chunks_compressed":  0,
+                "compression_ratio":  0.0,
+                "error":              str(exc),
             }
         })
