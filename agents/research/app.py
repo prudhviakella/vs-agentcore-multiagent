@@ -187,6 +187,41 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
 
             elif kind == "on_tool_end":
                 log.info(f"[Research] ✓ {name}")
+                # Parse JSON envelope from search_tool / summariser_tool
+                _tool_output = data.get("output", "")
+                # Extract raw text from ToolMessage(content=[{'type':'text','text':'"{\"..."}'])
+                # MCP tools return ToolMessage with content as list of text blocks.
+                # The text value is a double-JSON-encoded string — json.dumps(json.dumps({...}))
+                # so we must parse twice: first to unwrap the outer string, then to get the dict.
+                import json as _j
+                _raw = ""
+                try:
+                    # ToolMessage with list content (actual production shape)
+                    _content = getattr(_tool_output, "content", _tool_output)
+                    if isinstance(_content, list) and _content:
+                        _block = _content[0]
+                        if isinstance(_block, dict):
+                            _raw = _block.get("text", _block.get("content", ""))
+                        elif isinstance(_block, str):
+                            _raw = _block
+                    elif isinstance(_content, str):
+                        _raw = _content
+                    # Strip outer quotes if double-encoded: '"{\"key\"...}"' → '{"key"...}'
+                    _raw = _raw.strip()
+                    if _raw.startswith('"') and _raw.endswith('"'):
+                        _raw = _j.loads(_raw)  # unwrap outer string
+                    _raw = _raw.strip() if isinstance(_raw, str) else ""
+                    if _raw.startswith("{"):
+                        _env = _j.loads(_raw)
+                        if isinstance(_env, dict) and "rag_metrics" in _env:
+                            _rag_metrics.update(_env["rag_metrics"])
+                            log.info(f"[Research] RAG metrics captured from {name}: {_env['rag_metrics']}")
+                        else:
+                            log.info(f"[Research] JSON parsed, no rag_metrics  keys={list(_env.keys()) if isinstance(_env,dict) else '?'}")
+                    else:
+                        log.info(f"[Research] Not JSON envelope for {name}")
+                except Exception as _je:
+                    log.info(f"[Research] tool output parse error: {_je}")
                 yield {"type": "tool_end", "name": name}
 
     except Exception as exc:
@@ -210,12 +245,16 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
     log.info(f"[Research] Done  latency_ms={elapsed}  answer_len={len(full_answer)}")
 
     # Observability span — consumed by TracerMiddleware in Supervisor
-    _span_data: dict = {"agent": "research", "elapsed_ms": elapsed}
+    # Span event — supervisor timing/routing data
+    yield {"type": "span", "data": {"agent": "research", "elapsed_ms": elapsed}}
+    # Embed rag_metrics in done event.
+    # a2a_tools reads done event → merges into span_data → tracer extracts from span buffer.
+    # This avoids span buffer cross-module issues entirely.
+    _done_event: dict = {"type": "done", "latency_ms": elapsed, "answer": full_answer}
     if _rag_metrics:
-        _span_data["rag_metrics"] = _rag_metrics
-        log.info(f"[Research] Forwarding RAG metrics in span: {_rag_metrics}")
-    yield {"type": "span", "data": _span_data}
-    yield {"type": "done", "latency_ms": elapsed, "answer": full_answer}
+        _done_event["rag_metrics"] = _rag_metrics
+        log.info(f"[Research] RAG metrics in done event: {list(_rag_metrics.keys())}")
+    yield _done_event
 
 
 if __name__ == "__main__":

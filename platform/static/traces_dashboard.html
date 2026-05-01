@@ -431,7 +431,7 @@ function renderCards() {
 
   // RAG Quality metrics — from rag_* fields written by Tracer parsing JSON envelope
   const ragTraces   = t.filter(r => r.rag_rerank_top_score !== undefined);
-  const ragGated    = ragTraces.filter(r => r.rag_threshold_triggered).length;
+  const ragGated    = ragTraces.filter(r => r.rag_threshold_triggered === true || r.rag_threshold_triggered === 'True').length;
   const avgTopScore = ragTraces.length
     ? ragTraces.reduce((s,r) => s + parseFloat(r.rag_rerank_top_score||0), 0) / ragTraces.length : 0;
   const citTraces   = ragTraces.filter(r => r.rag_citation_coverage !== undefined);
@@ -552,7 +552,7 @@ function filteredRows() {
   if (filter === 'blocked') rows = rows.filter(r => r.guardrail_blocked);
   if (filter === 'fb_pos')  rows = rows.filter(r => r.feedback_rating === 'positive');
   if (filter === 'fb_neg')      rows = rows.filter(r => r.feedback_rating === 'negative');
-  if (filter === 'rag_gated')   rows = rows.filter(r => r.rag_threshold_triggered === true);
+  if (filter === 'rag_gated')   rows = rows.filter(r => r.rag_threshold_triggered === true || r.rag_threshold_triggered === 'True');
   if (filter === 'rag_uncited') rows = rows.filter(r => parseFloat(r.rag_uncited_claims_stripped||0) > 0);
   return rows;
 }
@@ -606,7 +606,7 @@ function renderTable() {
           ? `<span class="badge fb-neg">👎 ${r.feedback_reason ? esc(r.feedback_reason.slice(0,12)) : ''}</span>`
           : `<span style="color:var(--text-3);font-size:11px">—</span>`}</td>
         <td>${r.rag_rerank_top_score !== undefined
-          ? `<span class="badge ${parseFloat(r.rag_rerank_top_score)>=0.7?'green':parseFloat(r.rag_rerank_top_score)>=0.3?'amber':'red'}">${parseFloat(r.rag_rerank_top_score).toFixed(2)}</span>${r.rag_threshold_triggered?'<span style="color:var(--red);font-size:9px"> gated</span>':''}`
+          ? `<span class="badge ${parseFloat(r.rag_rerank_top_score)>=0.7?'green':parseFloat(r.rag_rerank_top_score)>=0.3?'amber':'red'}">${parseFloat(r.rag_rerank_top_score).toFixed(2)}</span>${(r.rag_threshold_triggered===true||r.rag_threshold_triggered==='True')?'<span style="color:var(--red);font-size:9px"> gated</span>':''}`
           : `<span style="color:var(--text-3);font-size:11px">—</span>`}</td>
       </tr>`).join('')}
     </tbody></table>`;
@@ -662,8 +662,8 @@ function trimQ(q) {
 
 function renderRagSection(r) {
   if (r.rag_rerank_top_score === undefined) return '';
-  const topScore   = parseFloat(r.rag_rerank_top_score || 0);
-  const gated      = r.rag_threshold_triggered;
+  const topScore   = parseFloat(r.rag_rerank_top_score || 0) || 0;
+  const gated      = r.rag_threshold_triggered === true || r.rag_threshold_triggered === 'True';
   const s1         = r.rag_chunks_stage1 || 0;
   const s2         = r.rag_chunks_stage2 || 0;
   const compressed = r.rag_chunks_compressed || 0;

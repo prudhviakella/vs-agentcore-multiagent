@@ -329,21 +329,26 @@ class TracerMiddleware(BaseAgentMiddleware):
         # a2a_tools.py buffers spans by thread_id (session_id).
         # We read them here using the session_id from context.
         session_id = ctx.get("session_id", "")
+        log.info(f"[TRACER] after_agent  session_id={session_id[:8] if session_id else 'EMPTY'}  run_id={run_id[:8]}")
         if session_id:
             try:
-                from agents.supervisor.a2a_tools import pop_span_buffer
+                # Import from invoke.py — the actual span buffer in production
+                from agents.supervisor.a2a_tools.invoke import pop_span_buffer
                 agent_spans = pop_span_buffer(session_id)
+                log.info(f"[TRACER] pop_span_buffer returned {len(agent_spans)} spans  session={session_id[:8]}")
                 if agent_spans:
                     trace["agent_spans"] = agent_spans
                     log.info(f"[TRACER] Collected {len(agent_spans)} sub-agent spans for run_id={run_id}")
-                    # Extract rag_metrics from any span that has them
-                    # (research agent forwards search_tool + summariser_tool metrics)
+                    # Extract rag_metrics from span_data
+                    # a2a_tools merges these from done event into span_data
                     for _span in agent_spans:
                         if "rag_metrics" in _span:
                             _rag = _span["rag_metrics"]
                             for _k, _v in _rag.items():
-                                trace[f"rag_{_k}"] = _v
-                            log.info(f"[TRACER] RAG metrics extracted from {_span.get('agent')} span: {list(_rag.keys())}")
+                                # Keep lists as lists (DynamoDB supports L type)
+                                # Convert everything else to string for DynamoDB S type
+                                trace[f"rag_{_k}"] = _v if isinstance(_v, list) else str(_v)
+                            log.info(f"[TRACER] RAG metrics stored  agent={_span.get('agent')}  keys={list(_rag.keys())}")
             except ImportError:
                 pass  # Not a Supervisor agent — no spans expected
 

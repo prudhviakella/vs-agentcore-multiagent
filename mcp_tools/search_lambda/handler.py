@@ -40,9 +40,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 # ── Constants ──────────────────────────────────────────────────────────────
 STAGE1_TOP_K       = 100     # broad recall — must be high to feed reranker
 STAGE2_TOP_N       = 20      # reranker keeps top N after scoring
-RERANK_THRESHOLD   = 0.3     # confidence gate: below this = no evidence
+RERANK_THRESHOLD   = 0.15    # confidence gate: corpus uses AI-generated summaries
+                             # which rerankers score lower than raw protocol text
 SSM_PREFIX         = os.environ.get("SSM_PREFIX", "/vs-agentcore-multiagent/prod")
 REGION             = os.environ.get("AWS_REGION", "us-east-1")
+PINECONE_NAMESPACE = os.environ.get("PINECONE_NAMESPACE", "clinical-trials")
 
 # Sentinel returned when no chunk clears the confidence threshold.
 # The research agent prompt recognises this and returns a grounded refusal.
@@ -122,17 +124,24 @@ def _stage1_broad_recall(query: str) -> list[dict]:
         os.environ["OPENAI_API_KEY"] = secret.get("api_key", "")
 
     oai_client = OpenAI()
+    # Index dimension is 1536.
+    # Try text-embedding-3-small first (native 1536, likely matches ingestion model).
+    # If ingestion used ada-002, cosine similarity still works well across both models
+    # since they share similar semantic space for clinical text.
     embedding  = oai_client.embeddings.create(
-        model = "text-embedding-3-large",
+        model = "text-embedding-3-small",
         input = query,
     ).data[0].embedding
+    log.info(f"[search] Embedding dim={len(embedding)}")
 
     index   = _get_pinecone_index()
     results = index.query(
-        vector          = embedding,
-        top_k           = STAGE1_TOP_K,
+        vector           = embedding,
+        top_k            = STAGE1_TOP_K,
+        namespace        = PINECONE_NAMESPACE,
         include_metadata = True,
     )
+    log.info(f"[search] Stage 1: Pinecone query namespace={PINECONE_NAMESPACE!r}  matches={len(results.get('matches', []))}")
 
     chunks = []
     for match in results.get("matches", []):
@@ -194,12 +203,31 @@ def _stage2_rerank(query: str, chunks: list[dict]) -> tuple[list[dict], float]:
 def _format_chunk(chunk: dict) -> str:
     """
     Format a chunk for return to the research agent LLM.
-    Includes the NCT ID (if present) so Stage 4b citation grounding can work.
+    Includes the NCT ID so Stage 4b citation grounding can work.
+
+    The Pinecone metadata has no nct_id field — NCT IDs are embedded
+    directly in the chunk text (e.g. "NCT04470427") or in S3 paths
+    (e.g. doc_NCT04470427_Pfizer_Vaccine_...). Extract via regex.
     """
+    import re as _re
     meta   = chunk.get("metadata", {})
-    nct_id = meta.get("nct_id") or meta.get("trial_id") or meta.get("source") or ""
     score  = chunk.get("rerank_score", chunk.get("score", 0.0))
     text   = chunk.get("text", "").strip()
+
+    # Try metadata fields first (future-proof)
+    nct_id = meta.get("nct_id") or meta.get("trial_id") or meta.get("source") or ""
+
+    # Fall back to regex extraction from text
+    if not nct_id:
+        _nct_match = _re.search(r'NCT\d{8}', text)
+        if _nct_match:
+            nct_id = _nct_match.group(0)
+
+    # Fall back to S3 path in text
+    if not nct_id:
+        _s3_match = _re.search(r'doc_(NCT\d{8})', text)
+        if _s3_match:
+            nct_id = _s3_match.group(1)
 
     header = f"[Relevance: {score:.2f}"
     if nct_id:
@@ -264,6 +292,10 @@ def handler(event: dict, context) -> str:
                 f"[search] Confidence gate triggered: top_score={top_score:.3f} "
                 f"< threshold={RERANK_THRESHOLD}"
             )
+            # Still capture top chunk IDs even when gated — tells learning pipeline
+            # whether wrong docs are ranking near threshold vs no docs at all
+            _top_ids    = [c.get("id", "") for c in reranked[:5]]
+            _top_scores = [round(c.get("rerank_score", 0.0), 4) for c in reranked[:5]]
             return json.dumps({
                 "chunks": INSUFFICIENT_CONTEXT,
                 "rag_metrics": {
@@ -272,15 +304,24 @@ def handler(event: dict, context) -> str:
                     "threshold_triggered": True,
                     "chunks_stage1":       chunks_stage1,
                     "chunks_stage2":       chunks_stage2,
+                    "top_chunk_ids":       _top_ids,
+                    "top_chunk_scores":    _top_scores,
                 }
             })
 
         # Format chunks for LLM
         formatted = "\n\n---\n\n".join(_format_chunk(c) for c in reranked)
 
+        # Top 5 chunk IDs and scores — for continuous learning pipeline
+        # Distinguishes "wrong docs retrieved" from "docs don't exist in KB"
+        # Small payload: just IDs (strings) + scores (floats), well within DynamoDB limits
+        TOP_N_LEARNING = 5
+        top_chunk_ids    = [c.get("id", "") for c in reranked[:TOP_N_LEARNING]]
+        top_chunk_scores = [round(c.get("rerank_score", 0.0), 4) for c in reranked[:TOP_N_LEARNING]]
+
         log.info(
             f"[search] Done  chunks_s1={chunks_stage1}  chunks_s2={chunks_stage2}  "
-            f"top_score={top_score:.3f}"
+            f"top_score={top_score:.3f}  top_ids={top_chunk_ids[:2]}"
         )
 
         return json.dumps({
@@ -291,6 +332,8 @@ def handler(event: dict, context) -> str:
                 "threshold_triggered": False,
                 "chunks_stage1":       chunks_stage1,
                 "chunks_stage2":       chunks_stage2,
+                "top_chunk_ids":       top_chunk_ids,
+                "top_chunk_scores":    top_chunk_scores,
             }
         })
 
