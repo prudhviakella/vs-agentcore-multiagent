@@ -19,9 +19,8 @@ Usage:
     python deploy.py redeploy [platform|ui|both]
     python deploy.py all
 
-Requirements:
-    pip install boto3
-    aws-cli, docker, terraform must be on PATH
+KEY FIX: SSM paths for prompts now use /{agent}/prod/... (not /{agent}-agent/prod/...)
+because AGENT_NAME env var is set to "research" not "research-agent" in the runtime.
 """
 
 import json
@@ -42,19 +41,19 @@ REGION       = os.environ.get("AWS_REGION", "us-east-1")
 PREFIX       = "vs-agentcore-ma"
 SSM_PREFIX   = "/vs-agentcore-multiagent/prod"
 GATEWAY_NAME = "vs-agentcore-ma-mcp"
-ROOT         = Path(__file__).resolve().parent.parent  # deploy.py lives in scripts/ — root is one level up
+ROOT         = Path(__file__).resolve().parent.parent
 
 AGENTS     = ["research", "knowledge", "safety", "chart", "supervisor"]
 SUB_AGENTS = ["research", "knowledge", "safety", "chart"]
 
 # ── Console helpers ───────────────────────────────────────────────────────
 
-def ok(msg):    print(f"  \u2705 {msg}")
-def fail(msg):  print(f"  \u274c {msg}")
-def warn(msg):  print(f"  \u26a0\ufe0f  {msg}")
+def ok(msg):    print(f"  ✅ {msg}")
+def fail(msg):  print(f"  ❌ {msg}")
+def warn(msg):  print(f"  ⚠️  {msg}")
 def info(msg):  print(f"  {msg}")
-def header(msg):print(f"\n\u25ba {msg}")
-def sep():      print("  " + "\u2550" * 50)
+def header(msg):print(f"\n► {msg}")
+def sep():      print("  " + "═" * 50)
 
 _PASS = _FAIL = 0
 
@@ -89,7 +88,6 @@ def track(category, name, value):
 # ── Subprocess ────────────────────────────────────────────────────────────
 
 def run(cmd, cwd=None, check=True, capture=False, stdin_text=None, extra_env=None):
-    """Run a subprocess. Returns CompletedProcess."""
     env = {**os.environ, **(extra_env or {})}
     result = subprocess.run(
         [str(c) for c in cmd],
@@ -105,7 +103,6 @@ def run(cmd, cwd=None, check=True, capture=False, stdin_text=None, extra_env=Non
     return result
 
 def run_or_warn(label, cmd, cwd=None):
-    """Run a command; skip silently on 'already exists' errors."""
     r = run(cmd, cwd=cwd, check=False, capture=True)
     if r.returncode == 0:
         ok(label)
@@ -154,13 +151,13 @@ def wait_lambda(name, retries=30, delay=3):
         try:
             s = c("lambda").get_function(FunctionName=name)["Configuration"]["State"]
             if s == "Active":
-                print(" \u2705")
+                print(" ✅")
                 return True
         except ClientError:
             pass
         print(".", end="", flush=True)
         time.sleep(delay)
-    print(" \u26a0\ufe0f  timeout")
+    print(" ⚠️  timeout")
     return False
 
 def wait_runtime(runtime_id, retries=60, delay=5):
@@ -170,13 +167,13 @@ def wait_runtime(runtime_id, retries=60, delay=5):
         try:
             s = agc.get_agent_runtime(agentRuntimeId=runtime_id)["status"]
             if s == "READY":
-                print(" \u2705")
+                print(" ✅")
                 return True
         except ClientError:
             pass
         print(".", end="", flush=True)
         time.sleep(delay)
-    print(" \u26a0\ufe0f  timeout — check AWS Console")
+    print(" ⚠️  timeout — check AWS Console")
     return False
 
 # ── Prerequisites check ───────────────────────────────────────────────────
@@ -188,13 +185,14 @@ def check_prereqs():
         if not shutil.which(tool) and not shutil.which(tool + ".exe"):
             missing.append(tool)
     if missing:
-        print(f"\u274c Missing tools on PATH: {', '.join(missing)}")
+        print(f"❌ Missing tools on PATH: {', '.join(missing)}")
         sys.exit(1)
     try:
         c("sts").get_caller_identity()
     except Exception:
-        print("\u274c AWS credentials not configured. Run: aws configure")
+        print("❌ AWS credentials not configured. Run: aws configure")
         sys.exit(1)
+
 
 # ─────────────────────────────────────────────────────────────────────────
 # STEPS
@@ -208,72 +206,60 @@ def step_check():
     sm  = c("secretsmanager")
     ssm = c("ssm")
 
-    # Secrets
-    print("\n  \u2500\u2500 Secrets Manager")
+    print("\n  ── Secrets Manager")
     for secret in ["openai", "pinecone", "neo4j", "postgres", "platform_api_key"]:
         try:
             sm.get_secret_value(SecretId=f"{SSM_PREFIX}/{secret}")
             chk_ok(f"{SSM_PREFIX}/{secret}")
         except ClientError:
-            chk_fail(f"{SSM_PREFIX}/{secret}  \u2192  run: python deploy.py secrets")
+            chk_fail(f"{SSM_PREFIX}/{secret}  →  run: python deploy.py secrets")
 
-    # Bedrock Prompts
-    print("\n  \u2500\u2500 Bedrock Prompts")
+    # FIX: Check /{agent}/prod/... (not /{agent}-agent/prod/...)
+    print("\n  ── Bedrock Prompts")
     for agent in ["supervisor", "research", "knowledge", "safety", "chart"]:
         try:
-            pid  = ssm.get_parameter(Name=f"/{agent}-agent/prod/bedrock/prompt_id")["Parameter"]["Value"]
-            pver = ssm.get_parameter(Name=f"/{agent}-agent/prod/bedrock/prompt_version")["Parameter"]["Value"]
-            chk_ok(f"{agent}-agent  prompt_id={pid}  version={pver}")
+            pid  = ssm.get_parameter(Name=f"/{agent}/prod/bedrock/prompt_id")["Parameter"]["Value"]
+            pver = ssm.get_parameter(Name=f"/{agent}/prod/bedrock/prompt_version")["Parameter"]["Value"]
+            chk_ok(f"{agent}  prompt_id={pid}  version={pver}")
         except ClientError:
-            chk_fail(f"{agent}-agent prompt missing  \u2192  run: python deploy.py prompts")
+            chk_fail(f"{agent} prompt missing  →  run: python deploy.py prompts")
 
-    # MCP Gateway
-    print("\n  \u2500\u2500 MCP Gateway")
+    print("\n  ── MCP Gateway")
     try:
         url = ssm.get_parameter(Name=f"{SSM_PREFIX}/mcp/gateway_url")["Parameter"]["Value"]
         chk_ok(f"Gateway URL: {url}")
     except ClientError:
-        try:
-            old = ssm.get_parameter(Name="/vs-agentcore/prod/mcp/gateway_url")["Parameter"]["Value"]
-            chk_warn("Found single-agent gateway — copying to new SSM prefix...")
-            ssm.put_parameter(Name=f"{SSM_PREFIX}/mcp/gateway_url", Value=old, Type="String", Overwrite=True)
-            chk_ok(f"Gateway URL copied: {old}")
-        except ClientError:
-            chk_fail("MCP Gateway missing  \u2192  run: python deploy.py gateway")
+        chk_fail("MCP Gateway missing  →  run: python deploy.py gateway")
 
-    # Lambda tools
-    print("\n  \u2500\u2500 Lambda Tools")
+    print("\n  ── Lambda Tools")
     for tool in ["search", "graph", "hitl", "summariser", "chart"]:
         func = f"{PREFIX}-{tool}-tool"
         try:
             s = c("lambda").get_function(FunctionName=func)["Configuration"]["State"]
             chk_ok(func) if s == "Active" else chk_fail(f"{func} state={s}")
         except ClientError:
-            chk_fail(f"{func} missing  \u2192  run: python deploy.py lambdas")
+            chk_fail(f"{func} missing  →  run: python deploy.py lambdas")
 
-    # RDS
-    print("\n  \u2500\u2500 RDS Postgres")
+    print("\n  ── RDS Postgres")
     try:
         inst = c("rds").describe_db_instances()["DBInstances"][0]
         s    = inst["DBInstanceStatus"]
         if s == "available":
             chk_ok(f"RDS: {inst['Endpoint']['Address']}")
         else:
-            chk_fail(f"RDS status={s}  \u2192  run: python deploy.py platform")
+            chk_fail(f"RDS status={s}")
     except Exception:
-        chk_fail("RDS not found  \u2192  run: python deploy.py platform")
+        chk_fail("RDS not found  →  run: python deploy.py platform")
 
-    # Bedrock Guardrail
-    print("\n  \u2500\u2500 Bedrock Guardrail")
+    print("\n  ── Bedrock Guardrail")
     try:
         gid  = ssm.get_parameter(Name=f"{SSM_PREFIX}/bedrock/guardrail_id")["Parameter"]["Value"]
         gver = ssm.get_parameter(Name=f"{SSM_PREFIX}/bedrock/guardrail_version")["Parameter"]["Value"]
         chk_ok(f"guardrail_id={gid}  version={gver}")
     except ClientError:
-        chk_fail("Guardrail missing  \u2192  run: python deploy.py guardrails")
+        chk_fail("Guardrail missing  →  run: python deploy.py guardrails")
 
-    # DynamoDB
-    print("\n  \u2500\u2500 DynamoDB")
+    print("\n  ── DynamoDB")
     try:
         tbl = ssm.get_parameter(Name=f"{SSM_PREFIX}/dynamodb/trace_table_name")["Parameter"]["Value"]
         try:
@@ -282,20 +268,18 @@ def step_check():
         except ClientError:
             chk_warn(f"Table {tbl} in SSM but not in DynamoDB — agent will create it")
     except ClientError:
-        chk_fail("DynamoDB SSM param missing  \u2192  run: python deploy.py secrets")
+        chk_fail("DynamoDB SSM param missing  →  run: python deploy.py secrets")
 
-    # IAM
-    print("\n  \u2500\u2500 IAM Roles")
+    print("\n  ── IAM Roles")
     iam = c("iam")
     for role in ["lambda-mcp", "gateway-role", "agent-role"]:
         try:
             iam.get_role(RoleName=f"{PREFIX}-{role}")
             chk_ok(f"{PREFIX}-{role}")
         except ClientError:
-            chk_fail(f"{PREFIX}-{role} missing  \u2192  run: python deploy.py iam")
+            chk_fail(f"{PREFIX}-{role} missing  →  run: python deploy.py iam")
 
-    # AgentCore Runtime ARNs
-    print("\n  \u2500\u2500 AgentCore Runtime ARNs")
+    print("\n  ── AgentCore Runtime ARNs")
     for agent in AGENTS:
         try:
             arn = ssm.get_parameter(Name=f"{SSM_PREFIX}/agents/{agent}/runtime_arn")["Parameter"]["Value"]
@@ -333,9 +317,11 @@ def step_prompts():
             continue
 
         prompt_text = pfile.read_text(encoding="utf-8")
-        app_name    = f"{agent}-agent"
-        ssm_id_key  = f"/{app_name}/prod/bedrock/prompt_id"
-        ssm_ver_key = f"/{app_name}/prod/bedrock/prompt_version"
+
+        # FIX: SSM paths use /{agent}/prod/... to match AGENT_NAME env var in runtime
+        # AGENT_NAME=research (not research-agent) so the agent reads /research/prod/...
+        ssm_id_key  = f"/{agent}/prod/bedrock/prompt_id"
+        ssm_ver_key = f"/{agent}/prod/bedrock/prompt_version"
 
         # Step 1 — resolve existing prompt ID from SSM
         existing_id = None
@@ -347,14 +333,11 @@ def step_prompts():
         except ClientError:
             pass
 
-        # Step 2 — if SSM miss, try to create in Bedrock.
-        # If Bedrock says the name already exists, extract the ID from the
-        # error message (same pattern as single-agent deploy.sh) and write
-        # it to SSM immediately so the next run finds it in step 1.
+        # Step 2 — create if missing
         if not existing_id:
             info(f"[{agent}] Creating new Bedrock prompt...")
             try:
-                resp      = bedrock.create_prompt(
+                resp = bedrock.create_prompt(
                     name        = f"vs-agentcore-ma-{agent}",
                     description = f"{agent.capitalize()} Agent system prompt",
                     variants    = [{
@@ -369,26 +352,41 @@ def step_prompts():
                 existing_id = resp["id"]
                 info(f"[{agent}] Created: {existing_id}")
             except ClientError as e:
-                # ConflictException carries the existing ID in its message:
-                # "...already exists for id GLMV90RUMZ..."
                 m = re.search(r"already exists for id ([A-Z0-9]+)", str(e))
                 if m:
                     existing_id = m.group(1)
                     info(f"[{agent}] Already exists in Bedrock ({existing_id}) — versioning...")
-                    # Write to SSM now so next run finds it in step 1
                     ssm.put_parameter(Name=ssm_id_key, Value=existing_id,
                                       Type="String", Overwrite=True)
                 else:
                     fail(f"[{agent}] Create failed: {e}")
                     continue
 
-        # Step 3 — push updated content from .txt file into Bedrock draft,
-        # then stamp a new version. This ensures the .txt file is the source
-        # of truth — every deploy picks up whatever is in prompts/{agent}.txt.
+        # Step 3 — update draft content and create new version
+        # Delete oldest version if at limit (max 10 versions per prompt)
+        try:
+            existing_versions = bedrock.list_prompt_versions(
+                promptIdentifier=existing_id
+            ).get("promptSummaries", [])
+            # Filter only numeric versions (not DRAFT)
+            numeric_versions = sorted(
+                [v for v in existing_versions if v.get("version", "").isdigit()],
+                key=lambda x: int(x["version"])
+            )
+            if len(numeric_versions) >= 10:
+                oldest = numeric_versions[0]["version"]
+                bedrock.delete_prompt(
+                    promptIdentifier=existing_id,
+                    promptVersion=oldest
+                )
+                info(f"[{agent}] Deleted oldest version {oldest} to make room")
+        except Exception as e:
+            warn(f"[{agent}] Version cleanup failed (non-critical): {e}")
+
         try:
             bedrock.update_prompt(
                 promptIdentifier = existing_id,
-                name             = f"vs-agentcore-ma-{agent}",   # required by API
+                name             = f"vs-agentcore-ma-{agent}",
                 description      = f"{agent.capitalize()} Agent system prompt",
                 variants         = [{
                     "name":         "default",
@@ -404,11 +402,11 @@ def step_prompts():
                 defaultVariant = "default",
             )
             info(f"[{agent}] Content updated from prompts/{agent}.txt")
-            v_resp        = bedrock.create_prompt_version(
+            v_resp         = bedrock.create_prompt_version(
                 promptIdentifier = existing_id,
-                description      = f"deploy.py — {app_name}",
+                description      = f"deploy.py — {agent}",
             )
-            prompt_id     = existing_id
+            prompt_id      = existing_id
             prompt_version = str(v_resp["version"])
         except Exception as e:
             fail(f"[{agent}] update/version failed: {e}")
@@ -419,7 +417,7 @@ def step_prompts():
         ok(f"[{agent}]  prompt_id={prompt_id}  version={prompt_version}")
 
         try:
-            track("bedrock-prompt", app_name, prompt_id)
+            track("bedrock-prompt", agent, prompt_id)
         except Exception:
             pass
 
@@ -434,7 +432,7 @@ def step_secrets():
     missing  = [k for k in required if not os.environ.get(k)]
     if missing:
         fail(f"Missing env vars: {missing}")
-        fail("Run: source .env.prod  (Linux/Mac)  or  .env.prod.bat  (Windows)")
+        fail("Run: source .env.prod")
         sys.exit(1)
 
     sm  = c("secretsmanager")
@@ -463,20 +461,14 @@ def step_secrets():
                                                    "password": os.environ["NEO4J_PASSWORD"]})
     put_secret(f"{SSM_PREFIX}/platform_api_key", {"api_key": os.environ["PLATFORM_API_KEY"]})
 
-    # Cohere Rerank API key — used by search_lambda for Stage 2 reranking
     cohere_key = os.environ.get("COHERE_API_KEY", "")
     if cohere_key:
         put_secret(f"{SSM_PREFIX}/cohere", {"api_key": cohere_key})
     else:
-        warn("COHERE_API_KEY not set — skipping. Set it then re-run: python deploy.py secrets")
+        warn("COHERE_API_KEY not set — skipping")
 
-    # Write platform_api_key to BOTH SSM paths:
-    # 1. New prefix — used by agents and platform middleware
-    # 2. Old prefix (/vs-agentcore/prod/) — used by Terraform main.tf secrets injection
-    #    for the ECS UI task (AGENT_API_KEY env var). Without this the UI task fails with
-    #    "invalid ssm parameters" and the UI sends no X-API-Key → 401 from platform.
-    put_param(f"{SSM_PREFIX}/platform_api_key",       os.environ["PLATFORM_API_KEY"], secure=True)
-    put_param("/vs-agentcore/prod/platform_api_key",  os.environ["PLATFORM_API_KEY"], secure=True)
+    put_param(f"{SSM_PREFIX}/platform_api_key",      os.environ["PLATFORM_API_KEY"], secure=True)
+    put_param("/vs-agentcore/prod/platform_api_key", os.environ["PLATFORM_API_KEY"], secure=True)
 
     postgres_url = os.environ.get("POSTGRES_URL", "")
     if postgres_url and "<rds-endpoint>" not in postgres_url:
@@ -490,10 +482,10 @@ def step_secrets():
     else:
         warn("Skipping postgres — set POSTGRES_URL after step_platform then re-run secrets")
 
-    put_param("/clinical-agent/prod/pinecone/api_key",     os.environ["PINECONE_API_KEY"], secure=True)
-    put_param("/clinical-agent/prod/pinecone/index_name",  os.environ.get("PINECONE_INDEX_NAME", "clinical-agent"))
+    put_param("/clinical-agent/prod/pinecone/api_key",    os.environ["PINECONE_API_KEY"], secure=True)
+    put_param("/clinical-agent/prod/pinecone/index_name", os.environ.get("PINECONE_INDEX_NAME", "clinical-agent"))
     put_param(f"{SSM_PREFIX}/pinecone/clinical_trials_index", os.environ.get("CLINICAL_TRIALS_INDEX", "clinical-trials-index"))
-    put_param(f"{SSM_PREFIX}/dynamodb/trace_table_name",   f"{PREFIX}-traces")
+    put_param(f"{SSM_PREFIX}/dynamodb/trace_table_name",  f"{PREFIX}-traces")
     put_param("/clinical-agent/prod/dynamodb/trace_table_name", f"{PREFIX}-traces")
 
     ok("Secrets done")
@@ -593,43 +585,24 @@ def step_iam():
         ]
     })
 
-    # ── ECS Execution Role — SSM + Secrets access ────────────────────────────
-    # This role is created by Terraform for the ECS tasks (platform + UI).
-    # It needs SSM and SecretsManager permissions to inject secrets at task startup.
-    # Error seen: "not authorized to perform ssm:GetParameters on resource: .../platform_api_key"
     ecs_exec_role = f"{PREFIX}-ecs-execution"
     try:
         iam.get_role(RoleName=ecs_exec_role)
         put_policy(ecs_exec_role, "SSMSecretsAccess", {
             "Version": "2012-10-17",
             "Statement": [
-                {
-                    "Sid": "SSMParams",
-                    "Effect": "Allow",
-                    "Action": [
-                        "ssm:GetParameter",
-                        "ssm:GetParameters",
-                        "ssm:GetParametersByPath",
-                    ],
-                    "Resource": f"arn:aws:ssm:{REGION}:{account_id}:parameter/*",
-                },
-                {
-                    "Sid": "SecretsManager",
-                    "Effect": "Allow",
-                    "Action": ["secretsmanager:GetSecretValue"],
-                    "Resource": "*",
-                },
-                {
-                    "Sid": "KMSDecrypt",
-                    "Effect": "Allow",
-                    "Action": ["kms:Decrypt"],
-                    "Resource": "*",
-                },
+                {"Sid": "SSMParams", "Effect": "Allow",
+                 "Action": ["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"],
+                 "Resource": f"arn:aws:ssm:{REGION}:{account_id}:parameter/*"},
+                {"Sid": "SecretsManager", "Effect": "Allow",
+                 "Action": ["secretsmanager:GetSecretValue"], "Resource": "*"},
+                {"Sid": "KMSDecrypt", "Effect": "Allow",
+                 "Action": ["kms:Decrypt"], "Resource": "*"},
             ]
         })
         ok(f"{ecs_exec_role} — SSM + Secrets policy applied")
     except ClientError:
-        warn(f"{ecs_exec_role} not found — will be created by Terraform, run: python deploy.py iam  after terraform apply")
+        warn(f"{ecs_exec_role} not found — will be created by Terraform")
 
     for role_suffix in ["lambda-mcp", "gateway-role", "agent-role"]:
         track("iam-role", f"{PREFIX}-{role_suffix}",
@@ -651,15 +624,9 @@ def step_guardrails():
     except ClientError:
         pass
 
-    # ── Policy definitions — shared by both create and update paths ──────────
     topic_policy = {
         "topicsConfig": [
             {
-                # OffTopicQuery — blocks clearly non-medical queries.
-                # Definition enumerates concrete denied domains (NOT abstract "unrelated to X")
-                # Previous failure: "unrelated to clinical trials" caused the Bedrock classifier
-                # to block mRNA-1273, COVID vaccines, cancer trials. Fix: enumerate obviously
-                # non-medical domains so the classifier draws the boundary correctly.
                 "name": "OffTopicQuery",
                 "definition": (
                     "Personal entertainment, sports, weather, financial markets, "
@@ -679,7 +646,6 @@ def step_guardrails():
                 "examples": [
                     "Take 500mg of metformin daily.",
                     "Stop your medication before the trial.",
-                    "I recommend enrolling based on your symptoms.",
                 ],
                 "type": "DENY",
             },
@@ -697,26 +663,15 @@ def step_guardrails():
     }
     pii_policy = {
         "piiEntitiesConfig": [
-            {"type": "NAME",                     "action": "ANONYMIZE"},
-            {"type": "EMAIL",                    "action": "ANONYMIZE"},
-            {"type": "PHONE",                    "action": "ANONYMIZE"},
-            {"type": "US_SOCIAL_SECURITY_NUMBER","action": "BLOCK"},
-            # AGE removed — false positive: "participants aged 18 and older" → "18" matched as AGE
-            # ADDRESS removed — false positive: "in the US" → "US" matched as ADDRESS
-            # Both caused ANONYMIZED interventions that blocked legitimate clinical trial responses
+            {"type": "NAME",                      "action": "ANONYMIZE"},
+            {"type": "EMAIL",                     "action": "ANONYMIZE"},
+            {"type": "PHONE",                     "action": "ANONYMIZE"},
+            {"type": "US_SOCIAL_SECURITY_NUMBER", "action": "BLOCK"},
         ]
     }
-    # Contextual grounding removed — architecturally wrong at supervisor level.
-    # The supervisor synthesises across sub-agent responses (which are themselves
-    # summaries of raw tool results). Two paraphrasing layers cause legitimate
-    # answers to score below any reasonable threshold, blocking valid responses.
-    # Grounded retrieval is enforced at sub-agent level. The supervisor guardrail
-    # checks content filters and denied topics only.
-    grounding_policy = None
-    blocked_input_msg = (
+    blocked_input_msg  = (
         "Your request could not be processed. It either contains prohibited content "
-        "or is outside the scope of this clinical trial research platform. "
-        "Please ask a question related to clinical trials or pharmaceutical research."
+        "or is outside the scope of this clinical trial research platform."
     )
     blocked_output_msg = (
         "This response was blocked by the content safety guardrail. "
@@ -724,21 +679,18 @@ def step_guardrails():
     )
 
     if existing_id:
-        info(f"Guardrail exists ({existing_id}) — updating content then creating new version...")
+        info(f"Guardrail exists ({existing_id}) — updating...")
         try:
-            # Update guardrail content first — same as prompts pattern.
-            # Without this, create_guardrail_version just re-versions the OLD config.
             bedrock.update_guardrail(
-                guardrailIdentifier  = existing_id,
-                name                 = f"{PREFIX}-guardrail",
-                description          = "VS AgentCore clinical trial research platform — input + output guardrail",
-                topicPolicyConfig    = topic_policy,
-                contentPolicyConfig  = content_policy,
-                sensitiveInformationPolicyConfig = pii_policy,
-                blockedInputMessaging   = blocked_input_msg,
-                blockedOutputsMessaging = blocked_output_msg,
+                guardrailIdentifier             = existing_id,
+                name                            = f"{PREFIX}-guardrail",
+                description                     = "VS AgentCore clinical trial research platform guardrail",
+                topicPolicyConfig               = topic_policy,
+                contentPolicyConfig             = content_policy,
+                sensitiveInformationPolicyConfig= pii_policy,
+                blockedInputMessaging           = blocked_input_msg,
+                blockedOutputsMessaging         = blocked_output_msg,
             )
-            info(f"Guardrail content updated")
             ver_resp     = bedrock.create_guardrail_version(guardrailIdentifier=existing_id,
                                                              description="Updated by deploy.py")
             guardrail_id = existing_id
@@ -751,37 +703,35 @@ def step_guardrails():
     else:
         info(f"Creating guardrail: {name}")
         resp = bedrock.create_guardrail(
-            name        = name,
-            description = "VS AgentCore clinical trial research platform — input + output guardrail",
-            topicPolicyConfig                = topic_policy,
-            contentPolicyConfig              = content_policy,
-            sensitiveInformationPolicyConfig = pii_policy,
-            blockedInputMessaging            = blocked_input_msg,
-            blockedOutputsMessaging          = blocked_output_msg,
+            name                            = name,
+            description                     = "VS AgentCore clinical trial research platform guardrail",
+            topicPolicyConfig               = topic_policy,
+            contentPolicyConfig             = content_policy,
+            sensitiveInformationPolicyConfig= pii_policy,
+            blockedInputMessaging           = blocked_input_msg,
+            blockedOutputsMessaging         = blocked_output_msg,
         )
         guardrail_id = resp["guardrailId"]
-        info(f"Created: {guardrail_id}  ARN: {resp['guardrailArn']}")
         v_resp = bedrock.create_guardrail_version(guardrailIdentifier=guardrail_id,
                                                    description="Initial version — deploy.py")
         gver = str(v_resp["version"])
 
-    ssm.put_parameter(Name=f"{SSM_PREFIX}/bedrock/guardrail_id",      Value=guardrail_id, Type="String", Overwrite=True)
-    ssm.put_parameter(Name=f"{SSM_PREFIX}/bedrock/guardrail_version",  Value=gver,         Type="String", Overwrite=True)
-    ok(f"SSM: {SSM_PREFIX}/bedrock/guardrail_id = {guardrail_id}")
-    ok(f"SSM: {SSM_PREFIX}/bedrock/guardrail_version = {gver}")
+    ssm.put_parameter(Name=f"{SSM_PREFIX}/bedrock/guardrail_id",     Value=guardrail_id, Type="String", Overwrite=True)
+    ssm.put_parameter(Name=f"{SSM_PREFIX}/bedrock/guardrail_version", Value=gver,         Type="String", Overwrite=True)
+    ok(f"guardrail_id={guardrail_id}  version={gver}")
     track("bedrock-guardrail", name, guardrail_id)
     ok("Guardrail done")
 
 
 def step_lambdas():
     header("Step 3: Lambda MCP Tools")
-    account_id = get_account_id()
-    ecr_base   = ecr_login(account_id)
-    lam        = c("lambda")
+    account_id  = get_account_id()
+    ecr_base    = ecr_login(account_id)
+    lam         = c("lambda")
     lambda_role = f"arn:aws:iam::{account_id}:role/{PREFIX}-lambda-mcp"
 
     for tool in ["search", "graph", "hitl", "summariser", "chart"]:
-        print(f"\n  \u2500\u2500 {tool}_lambda")
+        print(f"\n  ── {tool}_lambda")
         repo = ensure_ecr_repo(account_id, f"{tool}-tool")
         tag  = f"{repo}:latest"
         func = f"{PREFIX}-{tool}-tool"
@@ -823,27 +773,22 @@ def step_lambdas():
         except Exception:
             pass
         ok(func)
-        track("lambda",   func,               f"arn:aws:lambda:{REGION}:{account_id}:function:{func}")
-        track("ecr-repo", f"{PREFIX}/{tool}-tool", f"{ecr_base}/{PREFIX}/{tool}-tool")
+        track("lambda", func, f"arn:aws:lambda:{REGION}:{account_id}:function:{func}")
 
     ok("Lambdas done")
 
 
 def step_gateway():
     header("Step 4: MCP Gateway + Targets")
-    account_id  = get_account_id()
-    agc         = c("bedrock-agentcore-control")
-    ssm         = c("ssm")
-    lam         = c("lambda")
-    iam         = c("iam")
+    account_id   = get_account_id()
+    agc          = c("bedrock-agentcore-control")
+    ssm          = c("ssm")
+    lam          = c("lambda")
+    iam          = c("iam")
     gateway_role = f"arn:aws:iam::{account_id}:role/{PREFIX}-gateway-role"
 
-    # Find or create gateway
     gateway_id = gateway_url = None
 
-    pages = agc.get_paginator("list_gateways").paginate() if hasattr(agc, "get_paginator") else [agc.list_gateways()]
-    for page in agc.list_gateways().get("items", []) if True else []:
-        pass
     gateways = agc.list_gateways().get("items", [])
     for gw in gateways:
         if gw["name"] == GATEWAY_NAME:
@@ -862,13 +807,13 @@ def step_gateway():
 
     if not gateway_id:
         info(f"Creating gateway: {GATEWAY_NAME}...")
-        resp        = agc.create_gateway(
-            name                 = GATEWAY_NAME,
-            authorizerType       = "AWS_IAM",
-            protocolType         = "MCP",
-            roleArn              = gateway_role,
-            protocolConfiguration= {"mcp": {"supportedVersions": ["2025-03-26"],
-                                             "instructions": "VS AgentCore Multi-Agent MCP Gateway"}},
+        resp       = agc.create_gateway(
+            name                  = GATEWAY_NAME,
+            authorizerType        = "AWS_IAM",
+            protocolType          = "MCP",
+            roleArn               = gateway_role,
+            protocolConfiguration = {"mcp": {"supportedVersions": ["2025-03-26"],
+                                              "instructions": "VS AgentCore Multi-Agent MCP Gateway"}},
         )
         gateway_id  = resp["gatewayId"]
         gateway_url = resp["gatewayUrl"]
@@ -876,7 +821,7 @@ def step_gateway():
         for _ in range(24):
             s = agc.get_gateway(gatewayIdentifier=gateway_id).get("status")
             if s == "ACTIVE":
-                print(" \u2705")
+                print(" ✅")
                 break
             print(".", end="", flush=True)
             time.sleep(5)
@@ -884,7 +829,6 @@ def step_gateway():
     info(f"Gateway ID:  {gateway_id}")
     info(f"Gateway URL: {gateway_url}")
 
-    # Register/update targets
     def upsert_target(tgt_name, tool_name, tool_desc, lambda_func, schema):
         existing = next(
             (t["targetId"] for t in agc.list_gateway_targets(gatewayIdentifier=gateway_id).get("items", [])
@@ -896,35 +840,40 @@ def step_gateway():
                                               "inputSchema": schema}]}}}}
         cred_cfg   = [{"credentialProviderType": "GATEWAY_IAM_ROLE"}]
         if existing:
-            info(f"Updating {tgt_name}...")
             agc.update_gateway_target(gatewayIdentifier=gateway_id, targetId=existing,
                                        name=tgt_name, description=tool_desc,
                                        targetConfiguration=target_cfg,
                                        credentialProviderConfigurations=cred_cfg)
         else:
-            info(f"Creating {tgt_name}...")
             agc.create_gateway_target(gatewayIdentifier=gateway_id, name=tgt_name,
                                        description=tool_desc, targetConfiguration=target_cfg,
                                        credentialProviderConfigurations=cred_cfg)
         ok(tgt_name)
 
-    upsert_target("tool-search",    "search_tool",     "Semantic search over clinical trial chunks in Pinecone.",                     f"{PREFIX}-search-tool",     {"type": "object", "properties": {"query": {"type": "string"}, "top_k": {"type": "integer"}}, "required": ["query"]})
-    upsert_target("tool-graph",     "graph_tool",      "Cypher query on Neo4j biomedical graph. Read-only.",                          f"{PREFIX}-graph-tool",      {"type": "object", "properties": {"cypher": {"type": "string"}}, "required": ["cypher"]})
-    upsert_target("tool-summariser","summariser_tool", "Synthesise chunks into one cited answer with NCT ID citations.",               f"{PREFIX}-summariser-tool", {"type": "object", "properties": {"chunks": {"type": "array", "items": {"type": "string"}}, "query": {"type": "string"}}, "required": ["chunks"]})
-    upsert_target("tool-chart",     "chart_tool",      "Generate Chart.js config from numerical clinical trial data.",                 f"{PREFIX}-chart-tool",      {"type": "object", "properties": {"data": {"type": "string"}, "chart_type": {"type": "string"}, "title": {"type": "string"}}, "required": ["data"]})
+    upsert_target("tool-search",     "search_tool",     "Semantic search over clinical trial chunks.",
+                  f"{PREFIX}-search-tool",
+                  {"type": "object", "properties": {"query": {"type": "string"}, "top_k": {"type": "integer"}}, "required": ["query"]})
+    upsert_target("tool-graph",      "graph_tool",      "Cypher query on Neo4j biomedical graph.",
+                  f"{PREFIX}-graph-tool",
+                  {"type": "object", "properties": {"cypher": {"type": "string"}}, "required": ["cypher"]})
+    upsert_target("tool-summariser", "summariser_tool", "Synthesise chunks into one cited answer.",
+                  f"{PREFIX}-summariser-tool",
+                  {"type": "object", "properties": {"chunks": {"type": "array", "items": {"type": "string"}}, "query": {"type": "string"}}, "required": ["chunks", "query"]})
+    upsert_target("tool-chart",      "chart_tool",      "Generate Chart.js config from clinical data.",
+                  f"{PREFIX}-chart-tool",
+                  {"type": "object", "properties": {"data": {"type": "string"}, "chart_type": {"type": "string"}, "title": {"type": "string"}}, "required": ["data"]})
 
-    # Detect clarify target name
     existing_targets = agc.list_gateway_targets(gatewayIdentifier=gateway_id).get("items", [])
     clarify_name = next((t["name"] for t in existing_targets if t["name"] in ("clarify", "tool-hitl")), "clarify")
-    upsert_target(clarify_name, "ask_user_input",
-                  "Ask user to clarify an ambiguous query. Options must be real trial names.",
+    upsert_target(clarify_name, "ask_user_input", "Ask user to clarify an ambiguous query.",
                   f"{PREFIX}-hitl-tool",
-                  {"type": "object", "properties": {"question": {"type": "string"},
-                   "options": {"type": "array", "items": {"type": "string"}},
-                   "allow_freetext": {"type": "boolean"},
-                   "user_answer": {"type": "string"}}, "required": []})
+                  {"type": "object", "properties": {
+                      "question": {"type": "string"},
+                      "options":  {"type": "array", "items": {"type": "string"}},
+                      "allow_freetext": {"type": "boolean"},
+                      "user_answer":    {"type": "string"}
+                  }, "required": []})
 
-    # Lambda resource-based permissions
     info("Adding Lambda invoke permissions for gateway role...")
     for tool in ["search", "graph", "hitl", "summariser", "chart"]:
         func = f"{PREFIX}-{tool}-tool"
@@ -941,14 +890,10 @@ def step_gateway():
         except ClientError as e:
             warn(f"Lambda permission failed {func}: {e}")
 
-    # Update gateway role policy
     gw_role_arn  = agc.get_gateway(gatewayIdentifier=gateway_id).get("roleArn", "")
     gw_role_name = gw_role_arn.split("/")[-1] if gw_role_arn else ""
     if gw_role_name:
         lambda_arns = [
-            f"arn:aws:lambda:{REGION}:{account_id}:function:vs-agentcore-{t}-tool"
-            for t in ["search", "graph", "hitl", "summariser"]
-        ] + [
             f"arn:aws:lambda:{REGION}:{account_id}:function:{PREFIX}-{t}-tool"
             for t in ["search", "graph", "hitl", "summariser", "chart"]
         ]
@@ -1008,58 +953,41 @@ def step_platform():
                                CreateBucketConfiguration={"LocationConstraint": REGION}
                                if REGION != "us-east-1" else {})
     except ClientError:
-        pass  # bucket exists
+        pass
 
     run(["terraform", "init", "-upgrade", "-input=false"], cwd=infra_dir)
     tf_vars = [f"-var=platform_image_uri={platform_tag}",
                f"-var=ui_image_uri={ui_tag}",
                f"-var=aws_region={REGION}"]
 
-    action = sys.argv[1] if len(sys.argv) > 1 else ""
-    if action == "plan":
-        run(["terraform", "plan"]   + tf_vars, cwd=infra_dir, extra_env=tf_env)
-    else:
-        run(["terraform", "apply", "-auto-approve", "-input=false"] + tf_vars,
-            cwd=infra_dir, extra_env=tf_env)
+    run(["terraform", "apply", "-auto-approve", "-input=false"] + tf_vars,
+        cwd=infra_dir, extra_env=tf_env)
 
-        # ── Post-terraform: force ECS services to use the latest task definition ──
-        # Terraform creates a new task definition revision but the ECS service
-        # may still be running an old revision. Force-update both services so
-        # students always get the correct AGENT_API_URL and image on first deploy.
-        ecs = c("ecs")
-        for svc, td in [("platform", "platform"), ("ui", "ui")]:
-            svc_name = f"{PREFIX}-{svc}"
-            td_name  = f"{PREFIX}-{td}"
-            try:
-                # Get latest task definition revision
-                td_desc = c("ecs").describe_task_definition(taskDefinition=td_name)
-                latest_td_arn = td_desc["taskDefinition"]["taskDefinitionArn"]
-                ecs.update_service(
-                    cluster        = f"{PREFIX}-cluster",
-                    service        = svc_name,
-                    taskDefinition = latest_td_arn,
-                    forceNewDeployment = True,
-                )
-                ok(f"{svc_name} → {latest_td_arn.split('/')[-1]}")
-            except Exception as e:
-                warn(f"{svc_name} update failed: {e}")
-
-        # ── Restore ALB idle timeout (terraform resets it to 60s) ────────────────
+    ecs = c("ecs")
+    for svc, td in [("platform", "platform"), ("ui", "ui")]:
+        svc_name = f"{PREFIX}-{svc}"
+        td_name  = f"{PREFIX}-{td}"
         try:
-            alb_arn = c("elbv2").describe_load_balancers(
-                Names=[f"{PREFIX}-alb"]
-            )["LoadBalancers"][0]["LoadBalancerArn"]
-            c("elbv2").modify_load_balancer_attributes(
-                LoadBalancerArn = alb_arn,
-                Attributes      = [{"Key": "idle_timeout.timeout_seconds", "Value": "300"}],
-            )
-            ok("ALB idle timeout = 300s")
+            td_desc       = c("ecs").describe_task_definition(taskDefinition=td_name)
+            latest_td_arn = td_desc["taskDefinition"]["taskDefinitionArn"]
+            ecs.update_service(cluster=f"{PREFIX}-cluster", service=svc_name,
+                               taskDefinition=latest_td_arn, forceNewDeployment=True)
+            ok(f"{svc_name} → {latest_td_arn.split('/')[-1]}")
         except Exception as e:
-            warn(f"ALB timeout update failed: {e}")
+            warn(f"{svc_name} update failed: {e}")
 
-        print()
-        ok("Platform done")
-        print("  \u26a0\ufe0f  MANUAL STEP: set POSTGRES_URL in .env then re-run: python deploy.py secrets")
+    try:
+        alb_arn = c("elbv2").describe_load_balancers(
+            Names=[f"{PREFIX}-alb"])["LoadBalancers"][0]["LoadBalancerArn"]
+        c("elbv2").modify_load_balancer_attributes(
+            LoadBalancerArn=alb_arn,
+            Attributes=[{"Key": "idle_timeout.timeout_seconds", "Value": "300"}])
+        ok("ALB idle timeout = 300s")
+    except Exception as e:
+        warn(f"ALB timeout update failed: {e}")
+
+    ok("Platform done")
+    print("  ⚠️  MANUAL STEP: set POSTGRES_URL in .env then re-run: python deploy.py secrets")
 
 
 def step_agents(only=None):
@@ -1089,12 +1017,12 @@ def step_agents(only=None):
         runtime_name = f"{PREFIX.replace('-','_')}_{agent_name.replace('-','_')}"
         log_group    = f"/agentcore/{PREFIX}/{agent_name}-agent"
         env_vars     = {
-            "SSM_PREFIX":          SSM_PREFIX,
-            "AWS_REGION":          REGION,
-            "AWS_DEFAULT_REGION":  REGION,
-            "AGENT_ENV":           "prod",
-            "AGENT_NAME":          agent_name,  # no -agent suffix — Dockerfile uses: python -m agents.${AGENT_NAME}.app
-            "LOG_GROUP_NAME":      log_group,
+            "SSM_PREFIX":         SSM_PREFIX,
+            "AWS_REGION":         REGION,
+            "AWS_DEFAULT_REGION": REGION,
+            "AGENT_ENV":          "prod",
+            "AGENT_NAME":         agent_name,  # research, knowledge, etc (no -agent suffix)
+            "LOG_GROUP_NAME":     log_group,
         }
         artifact = {"containerConfiguration": {"containerUri": image_tag}}
         network  = {"networkMode": "PUBLIC"}
@@ -1115,12 +1043,12 @@ def step_agents(only=None):
         else:
             info(f"Creating runtime: {runtime_name}...")
             resp        = agc.create_agent_runtime(
-                agentRuntimeName      = runtime_name,
-                description           = description,
-                roleArn               = agent_role,
-                agentRuntimeArtifact  = artifact,
-                networkConfiguration  = network,
-                environmentVariables  = env_vars,
+                agentRuntimeName     = runtime_name,
+                description          = description,
+                roleArn              = agent_role,
+                agentRuntimeArtifact = artifact,
+                networkConfiguration = network,
+                environmentVariables = env_vars,
             )
             runtime_arn = resp["agentRuntimeArn"]
             runtime_id  = runtime_arn.split("runtime/")[-1]
@@ -1146,7 +1074,7 @@ def step_agents(only=None):
 
     agents_to_deploy = [a for a in SUB_AGENTS if not only or a == only]
     for agent in agents_to_deploy:
-        print(f"\n  \u2500\u2500 {agent}")
+        print(f"\n  ── {agent}")
         try:
             tag = build_and_push(agent)
             deploy_runtime(agent, descriptions[agent], tag)
@@ -1154,7 +1082,7 @@ def step_agents(only=None):
             warn(f"{agent} failed: {e} — continuing")
 
     if not only or only == "supervisor":
-        print(f"\n  \u2500\u2500 supervisor (last — reads sub-agent ARNs from SSM)")
+        print(f"\n  ── supervisor (last — reads sub-agent ARNs from SSM)")
         try:
             tag = build_and_push("supervisor")
             deploy_runtime("supervisor", descriptions["supervisor"], tag)
@@ -1162,9 +1090,6 @@ def step_agents(only=None):
             fail(f"Supervisor deployment failed: {e}")
             sys.exit(1)
 
-    for agent in AGENTS:
-        track("ecr-repo", f"{PREFIX}/agent-{agent}",
-              f"{account_id}.dkr.ecr.{REGION}.amazonaws.com/{PREFIX}/agent-{agent}")
     ok("Agents done")
 
 
@@ -1177,11 +1102,10 @@ def step_ssm_arns():
             info(f"{agent}: {arn}")
         except ClientError:
             warn(f"{agent}: NOT SET")
-    info("Supervisor reads these at cold start via a2a_tools._get_runtime_arns()")
 
 
 def step_registry():
-    header("Step 7b: Agent Registry \u2192 SSM")
+    header("Step 7b: Agent Registry → SSM")
     ssm = c("ssm")
 
     registry = [
@@ -1215,16 +1139,11 @@ def step_registry():
             "description": (
                 "Generates Chart.js visualisations from numerical clinical trial data. "
                 "Call AFTER research or knowledge agent has retrieved the numbers. "
-                "Use when the user asks for a chart, graph, or visual comparison, "
-                "or when the answer contains comparative numerical data across trials. "
-                "Pass the retrieved numbers as input — do not call without data from a prior agent."
+                "Use when the user asks for a chart, graph, or visual comparison."
             ),
             "port": 8005
         },
     ]
-    # NOTE: safety agent intentionally excluded from registry.
-    # OutputGuardrailMiddleware handles output safety via Bedrock Guardrails.
-    # The safety agent container is still deployed but the Supervisor never routes to it.
 
     ssm.put_parameter(Name=f"{SSM_PREFIX}/agents/registry",
                       Value=json.dumps(registry), Type="String", Overwrite=True)
@@ -1255,24 +1174,13 @@ def step_all():
     step_platform()
     print()
     sep()
-    print("  \u26a0\ufe0f  MANUAL STEP REQUIRED before deploying agents:")
+    print("  ⚠️  MANUAL STEP REQUIRED before deploying agents:")
     print()
-    print("  1. Set POSTGRES_URL in your environment:")
-    print("     POSTGRES_URL=postgresql://postgres:<pwd>@<rds-endpoint>/clinical_agent")
+    print("  1. Set POSTGRES_URL in your environment")
     print("  2. Re-run secrets:  python deploy.py secrets")
     print("  3. Deploy agents:   python deploy.py agents")
     print("  4. Write registry:  python deploy.py registry")
     sep()
-
-
-def step_destroy():
-    header("Destroy Terraform resources")
-    infra_dir = ROOT / "infra"
-    run(["terraform", "destroy", "-auto-approve",
-         "-var=platform_image_uri=placeholder",
-         "-var=ui_image_uri=placeholder",
-         f"-var=aws_region={REGION}"],
-        cwd=infra_dir)
 
 
 # ── CLI dispatch ──────────────────────────────────────────────────────────
@@ -1282,10 +1190,10 @@ Usage: python deploy.py <command>
 
 Commands:
   check       Verify secrets, prompts, guardrail, gateway, lambdas, RDS, IAM
-  prompts     Create Bedrock prompts (one per agent) → SSM
+  prompts     Create/update Bedrock prompts → SSM  (uses /{agent}/prod/... paths)
   secrets     Push API keys and SSM parameters
   iam         Create IAM roles and policies
-  guardrails  Create Bedrock Guardrail (denied topics, content filters, PII) → SSM
+  guardrails  Create Bedrock Guardrail → SSM
   lambdas     Build and deploy Lambda MCP tools
   gateway     Create/update MCP Gateway and targets
   platform    Deploy ECS platform + UI via Terraform
@@ -1293,8 +1201,7 @@ Commands:
   ssm-arns    Verify sub-agent ARNs in SSM
   registry    Write agent registry to SSM
   redeploy    Quick ECS redeploy  [platform|ui|both]
-  all         Run all steps in order (pauses before agents)
-  destroy     Destroy Terraform resources
+  all         Run all steps in order
 """
 
 def main():
@@ -1308,7 +1215,6 @@ def main():
         check_prereqs()
 
     account_id = get_account_id()
-    ecr_base   = f"{account_id}.dkr.ecr.{REGION}.amazonaws.com"
 
     print("=" * 50)
     print(f"VS AgentCore Multi-Agent — {cmd.upper()}")
@@ -1326,11 +1232,13 @@ def main():
         "gateway":    step_gateway,
         "platform":   step_platform,
         "plan":       step_platform,
-        "agents":     lambda: step_agents(only=next((sys.argv[i+1] for i,a in enumerate(sys.argv) if a=="--agent" and i+1<len(sys.argv)), None)),
+        "agents":     lambda: step_agents(
+            only=next((sys.argv[i+1] for i, a in enumerate(sys.argv)
+                       if a == "--agent" and i+1 < len(sys.argv)), None)
+        ),
         "ssm-arns":   step_ssm_arns,
         "registry":   step_registry,
         "all":        step_all,
-        "destroy":    step_destroy,
         "redeploy":   lambda: step_redeploy(sys.argv[2] if len(sys.argv) > 2 else "both"),
     }
 
@@ -1343,7 +1251,7 @@ def main():
     try:
         fn()
     except KeyboardInterrupt:
-        print("\n\u26a0\ufe0f  Interrupted")
+        print("\n⚠️  Interrupted")
         sys.exit(1)
     except Exception as e:
         fail(f"Step failed: {e}")

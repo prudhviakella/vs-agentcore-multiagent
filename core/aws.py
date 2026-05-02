@@ -197,7 +197,6 @@ def get_guardrail_config() -> tuple[str, str]:
 
 # ── Bedrock Prompt Management ──────────────────────────────────────────────────
 
-@lru_cache(maxsize=2)
 def _fetch_prompt_template(prompt_id: str, prompt_version: str) -> str:
     """
     Fetch and cache a prompt template from Bedrock Prompt Management.

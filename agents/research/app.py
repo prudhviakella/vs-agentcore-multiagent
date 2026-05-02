@@ -211,7 +211,7 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
                             pass
                     _raw = _raw.strip() if isinstance(_raw, str) else ""
 
-                    # New format: "RAG_METRICS:{...}\n\n<chunks text>"
+                    # Format 1: search_tool — "RAG_METRICS:{...}\n\n<chunks text>"
                     if _raw.startswith("RAG_METRICS:"):
                         _lines = _raw.split("\n\n", 1)
                         _metrics_str = _lines[0][len("RAG_METRICS:"):]
@@ -221,6 +221,15 @@ async def handler(payload: dict, context: BedrockAgentCoreContext):
                             log.info(f"[Research] RAG metrics from {name}: {_metrics}")
                         except Exception as _je:
                             log.info(f"[Research] RAG_METRICS parse error: {_je}")
+                    # Format 2: summariser_tool — JSON envelope {"answer": "...", "rag_metrics": {...}}
+                    elif _raw.startswith("{"):
+                        try:
+                            _env = _j.loads(_raw)
+                            if isinstance(_env, dict) and "rag_metrics" in _env:
+                                _rag_metrics.update(_env["rag_metrics"])
+                                log.info(f"[Research] RAG metrics from {name}: {_env['rag_metrics']}")
+                        except Exception as _je:
+                            log.info(f"[Research] JSON parse error for {name}: {_je}")
                     else:
                         log.info(f"[Research] No RAG_METRICS header in {name} output")
                 except Exception as _je:

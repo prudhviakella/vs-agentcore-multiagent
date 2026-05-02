@@ -221,23 +221,47 @@ def handler(event: dict, context) -> str:
     raw_chunks = event.get("chunks", [])
     query      = event.get("query", "").strip()
 
+    # DEBUG — log exact input so we know what the LLM passed
+    log.info(f"[summariser] INPUT type={type(raw_chunks).__name__}  "
+             f"len={len(raw_chunks) if isinstance(raw_chunks, (str,list)) else '?'}  "
+             f"preview={repr(raw_chunks[:200]) if isinstance(raw_chunks, str) else repr(raw_chunks)[:200]}")
+
     # Normalise: accept either a string (full formatted text) or a list of strings.
     # The research agent LLM passes the full chunks string from search_tool directly.
     # Split on the separator we use in _format_chunk to recover individual chunks.
     if isinstance(raw_chunks, str):
-        # Strip RAG_METRICS header if present (added by search_lambda for research_app.py)
         _text = raw_chunks
+        # Unwrap outer quotes if double-encoded by MCP gateway: '"text"' → 'text'
+        _text = _text.strip()
+        if _text.startswith('"') and _text.endswith('"'):
+            try:
+                import json as _jj
+                _text = _jj.loads(_text)
+            except Exception:
+                pass
+        # Unescape \n → real newlines (MCP layer may escape newlines)
+        if '\\n' in _text:
+            _text = _text.replace('\\n', '\n').replace('\\t', '\t')
+        # Strip RAG_METRICS header if present
         if _text.startswith("RAG_METRICS:"):
             _parts = _text.split("\n\n", 1)
             _text = _parts[1] if len(_parts) > 1 else ""
         chunks = [c.strip() for c in _text.split("\n\n---\n\n") if c.strip()]
-        log.info(f"[summariser] chunks received as string  split_count={len(chunks)}")
+        log.info(f"[summariser] chunks received as string  split_count={len(chunks)}  text_len={len(_text)}")
     elif isinstance(raw_chunks, list):
         # Flatten: each item may itself be a formatted multi-chunk string
         chunks = []
         for item in raw_chunks:
             if isinstance(item, str):
-                _item = item
+                _item = item.strip()
+                if _item.startswith('"') and _item.endswith('"'):
+                    try:
+                        import json as _jj
+                        _item = _jj.loads(_item)
+                    except Exception:
+                        pass
+                if '\\n' in _item:
+                    _item = _item.replace('\\n', '\n').replace('\\t', '\t')
                 if _item.startswith("RAG_METRICS:"):
                     _parts = _item.split("\n\n", 1)
                     _item = _parts[1] if len(_parts) > 1 else ""

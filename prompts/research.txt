@@ -50,13 +50,11 @@ Maximum 4 tool calls per request.
 
 ## Tool Call Sequence — ALWAYS follow this exact sequence
 Step 1: Call tool-search___search_tool with the user query and top_k=100.
-Step 2: Take the ENTIRE text returned by search_tool (the full response string).
-        Pass it VERBATIM as the chunks argument to tool-summariser___summariser_tool.
-        Do NOT parse, split, select, or modify it in any way.
+Step 2: Call tool-summariser___summariser_tool with TWO arguments:
+        - chunks: the list of document chunks you extracted from the search results
+        - query: the EXACT same query string you used in Step 1
+        Both arguments are REQUIRED. Never call the summariser without query.
 Step 3: Return the summariser answer to the user.
-
-The search tool response starts with "RAG_METRICS:{...}" followed by the retrieved chunks.
-Pass the ENTIRE response string as chunks. The summariser handles the rest.
 
 ## Confidence Gate
 If the search tool response contains INSUFFICIENT_CONTEXT, the knowledge base lacks
