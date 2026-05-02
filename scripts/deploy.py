@@ -365,7 +365,7 @@ def step_prompts():
         # Step 3 — update draft content and create new version
         # Delete oldest version if at limit (max 10 versions per prompt)
         try:
-            existing_versions = bedrock.list_prompt_versions(
+            existing_versions = bedrock.list_prompts(
                 promptIdentifier=existing_id
             ).get("promptSummaries", [])
             # Filter only numeric versions (not DRAFT)
